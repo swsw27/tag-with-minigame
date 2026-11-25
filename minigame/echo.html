@@ -1,0 +1,237 @@
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>에코 아카이브 (Echo Archive)</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.js"></script>
+  <style>
+    /* 게임 분위기에 맞춘 어두운 배경 설정 */
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: #141414;
+      overflow: hidden;
+      color: white;
+      font-family: 'Malgun Gothic', sans-serif;
+    }
+    
+    /* p5.js가 생성하는 입력창/버튼 스타일 약간 수정 */
+    input, button {
+      font-family: inherit;
+    }
+  </style>
+</head>
+<body>
+  <script>
+    // --- 게임 데이터 ---
+    let originalMemory = "우리가 함께했던 그 바다는 정말 따뜻했어";
+    let words = [];
+    let scrambledMemory = "";
+
+    // --- 시스템 변수 ---
+    let gameState = 0; // 0: 인트로, 1: 주파수 조율, 2: 텍스트 복원, 3: 성공, 4: 실패
+    let attempts = 3;
+    let feedbackMsg = "";
+    
+    // --- 화면 중앙 정렬을 위한 좌표 ---
+    let startX, startY;
+
+    // --- UI 요소 ---
+    let startBtn;
+    let tuneSlider;
+    let inputField;
+    let submitBtn;
+
+    function setup() {
+      let canvas = createCanvas(600, 400);
+      
+      // 화면 정중앙에 캔버스 배치
+      startX = (windowWidth - width) / 2;
+      startY = (windowHeight - height) / 2;
+      canvas.position(startX, startY);
+      
+      textAlign(CENTER, CENTER);
+      
+      // 기억 데이터 섞기
+      words = originalMemory.split(" ");
+      words.sort(() => Math.random() - 0.5);
+      scrambledMemory = words.join(" ");
+
+      // 1. 시작 버튼 (인트로 화면용)
+      startBtn = createButton("시스템 접속");
+      startBtn.position(startX + width / 2 - 50, startY + height / 2 + 50);
+      startBtn.size(100, 30);
+      startBtn.mousePressed(() => {
+        gameState = 1;
+        startBtn.hide();
+        tuneSlider.show(); // 다음 단계 슬라이더 표시
+      });
+
+      // 2. 주파수 조율 슬라이더 (감정 동기화용)
+      tuneSlider = createSlider(0, 100, 10);
+      tuneSlider.position(startX + width / 2 - 100, startY + height / 2 + 50);
+      tuneSlider.size(200);
+      tuneSlider.hide();
+
+      // 3. 텍스트 입력창 및 제출 버튼
+      inputField = createInput("");
+      inputField.position(startX + width / 2 - 120, startY + height / 2 + 80);
+      inputField.size(150, 25);
+      inputField.hide();
+
+      submitBtn = createButton("복원 시도");
+      submitBtn.position(inputField.x + inputField.width + 10, inputField.y);
+      submitBtn.size(80, 31);
+      submitBtn.mousePressed(checkAnswer);
+      submitBtn.hide();
+    }
+
+    function draw() {
+      background(20);
+      drawGlitchEffect(); // 배경 노이즈 효과
+
+      // --- [상태 0] 인트로 ---
+      if (gameState === 0) {
+        fill(150, 200, 255);
+        textSize(20);
+        text("에코 아카이브 [기억 복원 프로토콜]", width / 2, height / 2 - 20);
+        textSize(14);
+        fill(200);
+        text("손상된 기억이 발견되었습니다. 복원사를 호출합니다.", width / 2, height / 2 + 10);
+      } 
+      
+      // --- [상태 1] 주파수(감정) 조율 ---
+      else if (gameState === 1) {
+        let currentVal = tuneSlider.value();
+        let targetVal = 73; // 목표 주파수
+        
+        fill(255);
+        textSize(18);
+        text("1단계: 감정 주파수를 동기화하세요", width / 2, 80);
+        
+        // 사인파(Sine wave) 그리기
+        noFill();
+        stroke(2);
+        stroke(map(currentVal, 0, 100, 50, 255), 150, 255);
+        beginShape();
+        for (let x = 100; x < 500; x += 10) {
+          let y = height / 2 - 20 + sin(x * 0.05 + frameCount * 0.1) * (Math.abs(currentVal - targetVal) + 5);
+          vertex(x, y);
+        }
+        endShape();
+        noStroke();
+        
+        fill(200);
+        // 고쳐진 부분: 백틱(`)을 사용하여 변수 출력
+        text(`현재 주파수: ${currentVal} Hz`, width / 2, height / 2 + 100);
+
+        // 주파수가 맞으면 다음 단계로
+        if (Math.abs(currentVal - targetVal) <= 2) {
+          fill(100, 255, 100);
+          text("주파수 동기화 완료! 잠시 후 데이터가 개방됩니다.", width / 2, height / 2 + 130);
+          
+          // 1.5초 후 상태 변경
+          if (frameCount % 90 === 0) { 
+            gameState = 2;
+            tuneSlider.hide();
+            inputField.show();
+            submitBtn.show();
+          }
+        }
+      } 
+      
+      // --- [상태 2] 텍스트 복원 ---
+      else if (gameState === 2) {
+        fill(255, 100, 100);
+        textSize(16);
+        text("⚠️ 2단계: 깨진 데이터를 재조립하세요", width / 2, 60);
+
+        fill(150, 255, 150);
+        textSize(24);
+        text(scrambledMemory, width / 2, 140);
+
+        fill(255);
+        textSize(14);
+        // 고쳐진 부분: 백틱(`)을 사용하여 변수 출력
+        text(`남은 시도: ${attempts}번`, width / 2, 190);
+
+        fill(255, 100, 100);
+        text(feedbackMsg, width / 2, 300);
+      } 
+      
+      // --- [상태 3] 성공 ---
+      else if (gameState === 3) {
+        fill(100, 255, 100);
+        textSize(24);
+        text("✨ 복원 성공", width / 2, height / 2 - 30);
+        fill(255);
+        textSize(16);
+        // 고쳐진 부분: 불필요한 따옴표 제거 후 백틱 혹은 변수 직접 출력
+        text(originalMemory, width / 2, height / 2 + 10);
+        fill(150, 200, 255);
+        text("[감정 데이터] '그리움' 추출 완료", width / 2, height / 2 + 50);
+      } 
+      
+      // --- [상태 4] 실패 ---
+      else if (gameState === 4) {
+        fill(255, 50, 50);
+        textSize(24);
+        text("💀 복원 실패", width / 2, height / 2 - 20);
+        fill(150);
+        textSize(16);
+        text("기억이 영구적으로 손실되었습니다...", width / 2, height / 2 + 20);
+      }
+    }
+
+    // 텍스트 정답 확인 로직
+    function checkAnswer() {
+      if (gameState !== 2) return;
+
+      let answer = inputField.value().trim();
+
+      if (answer === originalMemory) {
+        gameState = 3; // 성공
+        hideInputUI();
+      } else {
+        attempts--;
+        feedbackMsg = "❌ 배열이 일치하지 않습니다.";
+        inputField.value(""); 
+
+        if (attempts <= 0) {
+          gameState = 4; // 실패
+          hideInputUI();
+        }
+      }
+    }
+
+    // 입력창 숨기기
+    function hideInputUI() {
+      inputField.hide();
+      submitBtn.hide();
+    }
+
+    // 배경 디지털 노이즈(글리치) 효과 연출
+    function drawGlitchEffect() {
+      if (random(1) < 0.3) {
+        fill(255, 255, 255, random(10, 30));
+        noStroke();
+        rect(0, random(height), width, random(2, 10));
+      }
+    }
+
+    // 창 크기 조절 시 캔버스와 UI 위치 재조정
+    function windowResized() {
+      startX = (windowWidth - width) / 2;
+      startY = (windowHeight - height) / 2;
+      select('canvas').position(startX, startY);
+      
+      if (gameState === 0) startBtn.position(startX + width / 2 - 50, startY + height / 2 + 50);
+      if (gameState === 1) tuneSlider.position(startX + width / 2 - 100, startY + height / 2 + 50);
+      if (gameState === 2) {
+        inputField.position(startX + width / 2 - 120, startY + height / 2 + 80);
+        submitBtn.position(inputField.x + inputField.width + 10, inputField.y);
+      }
+    }
+  </script>
+</body>
+</html>

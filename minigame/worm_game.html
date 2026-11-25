@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Snake Game</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.6.0/p5.min.js"></script>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: #4a752c;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      overflow: hidden;
+      font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif;
+    }
+    canvas {
+      display: block;
+      box-shadow: 0 0 30px rgba(0, 0, 0, 0.6);
+    }
+  </style>
+</head>
+<body>
+
+<script>
+let snake;
+let food;
+let rez = 60;
+let w, h;
+let score = 0;
+let highScore = 0;
+
+function setup() {
+  createCanvas(600, 660);
+  w = 10;
+  h = 10;
+  frameRate(60);
+  snake = new Snake();
+  foodLocation();
+}
+
+function foodLocation() {
+  let available = [];
+  for (let i = 0; i < w; i++) {
+    for (let j = 0; j < h; j++) {
+      let occupied = false;
+      for (let part of snake.body) {
+        if (part.x === i && part.y === j) { occupied = true; break; }
+      }
+      if (!occupied) available.push(createVector(i, j));
+    }
+  }
+  if (available.length > 0) food = random(available);
+}
+
+function keyPressed() {
+  if (snake.isDead) return;
+  if (keyCode === LEFT_ARROW || key === 'a') snake.setDir(-1, 0);
+  else if (keyCode === RIGHT_ARROW || key === 'd') snake.setDir(1, 0);
+  else if (keyCode === DOWN_ARROW || key === 's') snake.setDir(0, 1);
+  else if (keyCode === UP_ARROW || key === 'w') snake.setDir(0, -1);
+}
+
+function draw() {
+  background(74, 117, 44);
+  drawScoreBoard();
+
+  push();
+  translate(0, 60);
+
+  // 배경 체커보드 패턴
+  for (let x = 0; x < w; x++) {
+    for (let y = 0; y < h; y++) {
+      fill((x + y) % 2 === 0 ? color(170, 215, 81) : color(162, 209, 73));
+      noStroke();
+      rect(x * rez, y * rez, rez, rez);
+    }
+  }
+
+  if (!snake.isDead) {
+    snake.update();
+    if (snake.eat(food)) {
+      score++;
+      if (score > highScore) highScore = score;
+      foodLocation();
+    }
+  }
+
+  snake.show();
+  if (food) drawApple(food.x, food.y);
+  pop();
+}
+
+function drawScoreBoard() {
+  fill(255); textSize(24); textAlign(LEFT, CENTER);
+  fill(231, 71, 29); ellipse(40, 30, 20, 20);
+  fill(255); text(score, 60, 30);
+  fill(255, 215, 0); triangle(width - 120, 20, width - 130, 40, width - 110, 40);
+  fill(255); text(highScore, width - 100, 30);
+}
+
+function drawApple(gx, gy) {
+  push();
+  translate((gx + 0.5) * rez, (gy + 0.5) * rez);
+  scale(rez);
+  noStroke();
+  fill(231, 71, 29); ellipse(0, 0.05, 0.75, 0.7);
+  fill(101, 67, 33); rect(-0.03, -0.4, 0.06, 0.2);
+  fill(50, 150, 50); ellipse(0.15, -0.3, 0.25, 0.15);
+  pop();
+}
+
+function resetGame() {
+  score = 0;
+  snake = new Snake();
+  foodLocation();
+}
+
+class Snake {
+  constructor() {
+    this.body = [createVector(2, 5), createVector(3, 5), createVector(4, 5)];
+    this.dir = createVector(1, 0);
+    this.nextDir = createVector(1, 0);
+    this.moveTimer = 0;
+    this.moveInterval = 10; 
+    this.isDead = false;
+    this.growing = false;
+  }
+
+  setDir(x, y) {
+    if (this.dir.x !== -x || this.dir.y !== -y) {
+      this.nextDir = createVector(x, y);
+    }
+  }
+
+  update() {
+    this.moveTimer++;
+    if (this.moveTimer >= this.moveInterval) {
+      this.moveTimer = 0;
+      this.dir = this.nextDir.copy();
+      let head = this.body[this.body.length - 1].copy();
+      head.add(this.dir);
+
+      if (head.x < 0 || head.x >= w || head.y < 0 || head.y >= h || this.selfCollide(head)) {
+        this.isDead = true;
+        setTimeout(resetGame, 1500);
+        return;
+      }
+
+      this.body.push(head);
+      if (!this.growing) this.body.shift();
+      this.growing = false;
+    }
+  }
+
+  selfCollide(head) {
+    for (let i = 0; i < this.body.length - 1; i++) {
+      if (this.body[i].x === head.x && this.body[i].y === head.y) return true;
+    }
+    return false;
+  }
+
+  eat(pos) {
+    let head = this.body[this.body.length - 1];
+    if (head.x === pos.x && head.y === pos.y) { this.growing = true; return true; }
+    return false;
+  }
+
+  show() {
+    let snakeColor = color(66, 133, 244);
+    let progress = this.moveTimer / this.moveInterval;
+
+    // --- 몸통 그리기 (각진 곳 제거 버전) ---
+    noFill();
+    stroke(snakeColor);
+    strokeWeight(rez * 0.85); 
+    strokeJoin(ROUND); // 모서리를 둥글게 깎음
+    strokeCap(ROUND);  // 끝단도 둥글게
+
+    beginShape();
+    // 꼬리부터 머리 직전 마디까지 부드럽게 이음
+    for (let i = 0; i < this.body.length - 1; i++) {
+      let curr = this.body[i];
+      let next = this.body[i + 1];
+      let x = lerp(curr.x, next.x, progress) + 0.5;
+      let y = lerp(curr.y, next.y, progress) + 0.5;
+      vertex(x * rez, y * rez);
+    }
+    
+    // 머리 위치 계산 (충돌 연출 포함)
+    let lastIdx = this.body.length - 1;
+    let hX = lerp(this.body[lastIdx - 1].x, this.body[lastIdx].x, progress) + 0.5;
+    let hY = lerp(this.body[lastIdx - 1].y, this.body[lastIdx].y, progress) + 0.5;
+
+    if (this.isDead) {
+      hX -= this.dir.x * 0.4;
+      hY -= this.dir.y * 0.4;
+    }
+    
+    // 마지막 정점을 머리 위치로 찍어줌
+    vertex(hX * rez, hY * rez);
+    endShape();
+
+    // --- 머리 그리기 ---
+    push();
+    translate(hX * rez, hY * rez);
+    rotate(this.dir.heading());
+
+    noStroke();
+    fill(snakeColor);
+    let squeeze = this.isDead ? 0.7 : 1.0;
+    // 몸통 두께와 머리 크기를 맞춰서 이질감 제거
+    ellipse(0, 0, rez * 1.0, rez * squeeze); 
+    
+    // 눈 그리기 (오타 수정 부분: rez0.2 -> rez * 0.2)
+    if (this.isDead) {
+      if (floor(frameCount / 8) % 2 === 0) {
+        stroke(255); strokeWeight(3);
+        line(-5, -rez * 0.2, 5, -rez * 0.2); 
+        line(-5, rez * 0.2, 5, rez * 0.2);
+      } else {
+        fill(255); noStroke();
+        ellipse(5, -rez * 0.2, 15, 15); 
+        ellipse(5, rez * 0.2, 15, 15);
+        fill(0); 
+        ellipse(8, -rez * 0.2, 6, 6); 
+        ellipse(8, rez * 0.2, 6, 6);
+      }
+    } else {
+      fill(255); 
+      ellipse(6, -rez * 0.2, 15, 15); 
+      ellipse(6, rez * 0.2, 15, 15);
+      fill(0); 
+      ellipse(10, -rez * 0.2, 7, 7); 
+      ellipse(10, rez * 0.2, 7, 7);
+    }
+    pop();
+  }
+}
+</script>
+
+</body>
+</html>

@@ -1,0 +1,782 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>이예찬의 게임제작소 - 미니게임 월드</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.js"></script>
+
+    <style>
+        html, body {
+            margin: 0; padding: 0;
+            background: #0f172a; color: #ffffff;
+            font-family: 'Malgun Gothic', sans-serif;
+            overflow: hidden;
+            height: 100%; width: 100%;
+            touch-action: none;
+            user-select: none;
+            box-sizing: border-box;
+        }
+        body {
+            display: flex; justify-content: center; align-items: center;
+        }
+        /* 캔버스 크기를 그대로 따라감 (메인 월드와 동일한 800x500 비율) */
+        #lobby-container {
+            position: relative;
+            box-shadow: 0 0 40px rgba(0, 255, 255, 0.2);
+            border-radius: 15px; overflow: hidden;
+            line-height: 0;
+        }
+        #game-container {
+            display: none; position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: #000; z-index: 100; overflow: hidden;
+        }
+        iframe {
+            width: 100%; height: calc(100% + 42px);
+            position: absolute; top: -42px; left: 0;
+            border: none; display: block;
+        }
+        /* 뒤로가기 버튼: 게임 컨테이너 밖에 두고 fixed로 최상단에 고정 */
+        #back-btn {
+            position: fixed; top: 15px; left: 15px; z-index: 2000;
+            display: none;
+            width: 48px; height: 48px; padding: 0;
+            background: rgba(255, 50, 50, 0.9); color: #fff;
+            border: 2px solid #fff; border-radius: 10px;
+            font-size: 22px; font-weight: bold; line-height: 1;
+            cursor: pointer; touch-action: manipulation;
+            -webkit-tap-highlight-color: transparent;
+        }
+        #back-btn.show { display: block; }
+
+        #bus-terminal-menu {
+            display: none; position: absolute;
+            top: 50%; left: 50%; transform: translate(-50%, -50%);
+            background: rgba(30, 41, 59, 0.95);
+            border: 3px solid #f59e0b; border-radius: 15px;
+            padding: 20px; width: 80%; max-width: 500px; max-height: 70%;
+            overflow-y: auto; z-index: 50;
+            line-height: normal; box-sizing: border-box;
+        }
+        #bus-terminal-menu h2 { text-align: center; color: #f59e0b; margin-top: 0; }
+        .destination-group { margin-bottom: 15px; }
+        .destination-group h3 { color: #94a3b8; font-size: 0.95rem; }
+        .destination-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; }
+        .destination-item {
+            background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 8px; padding: 10px; cursor: pointer; display: flex; align-items: center;
+        }
+        .destination-item:hover { background: rgba(245, 158, 11, 0.2); border-color: #f59e0b; }
+        .destination-item .icon { font-size: 1.3rem; margin-right: 8px; }
+        #close-terminal-btn { display: block; width: 100px; margin: 20px auto 0; padding: 8px; background: rgba(255, 50, 50, 0.8); border: none; border-radius: 5px; color: white; cursor: pointer; }
+    </style>
+</head>
+<body>
+
+    <div id="lobby-container">
+        <div id="bus-terminal-menu">
+            <h2><span>🚌</span>이예찬 메타버스 버스 터미널</h2>
+            <div id="destinations-content"></div>
+            <button id="close-terminal-btn" onclick="closeBusMenu()">닫기</button>
+        </div>
+    </div>
+
+    <div id="game-container">
+        <iframe id="game-frame" src=""></iframe>
+    </div>
+    <button id="back-btn" type="button" aria-label="뒤로가기">←</button>
+
+    <script>
+        // =====================================================
+        // 🔗 sketch.js 와 반드시 같은 값으로 유지할 공통 상수
+        // =====================================================
+        const BASE_W = 800;
+        const BASE_H = 500;
+        const PLAYER_RADIUS = 20;
+        const PLAYER_SPEED = 4;
+        const JOY = { baseX: 90, baseOffsetY: 90, r: 50, stickR: 25 };
+        const joyBaseY = () => height - JOY.baseOffsetY;
+        const actionBtn = () => ({ x: width - 70, y: height - 140, r: 35 }); // 입장/나가기
+        // =====================================================
+
+        // 🎉 하단 이모트 바 (메인 sketch.js 의 EMOTE_BAR_ITEMS 와 같은 구성)
+        const EMOTE_BAR_ITEMS = [
+            { key: 'shape', label: 'C 모양', w: 64 },
+            { key: '👋', label: '1 👋', w: 50 },
+            { key: '😎', label: '2 😎', w: 50 },
+            { key: '😂', label: '3 😂', w: 50 },
+            { key: '🔥', label: '4 🔥', w: 50 }
+        ];
+        const EMOTE_BAR_GAP = 6;
+        const EMOTE_BAR_H = 26;
+        const EMOTE_BAR_BOTTOM = 8;
+
+        const TILE_SIZE = 50;
+        const COLS = 30;
+        const ROWS = 20;
+        const MAP_WIDTH = COLS * TILE_SIZE;
+        const MAP_HEIGHT = ROWS * TILE_SIZE;
+
+        let playerX = 750;
+        let playerY = 500;
+        let playerAngle = 0;
+
+        let savedPlayerX = 750;
+        let savedPlayerY = 500;
+
+        let camX = 0;
+        let camY = 0;
+        let tileMap = [];
+
+        // 버스 빠른 이동
+        let isBusDriving = false;
+        let busTargetX = null;
+        let busTargetY = null;
+        let busSpeed = 25;
+        let activeBusMenu = false;
+        let inSubGame = false; // 개별 미니게임 실행 중 여부
+
+        // 🌐 스카이캐쳐 온라인 대전 중계 대상 게임이 실행 중인지
+        let relayGame = false;
+
+        // 모바일 조이스틱 (sketch.js와 동일: 좌하단 고정)
+        let isMobile = false;        // 현재 입력 모드에서 모바일 조작 UI를 쓰는지
+        let inputMode = 'AUTO';      // 'PC' | 'AUTO' | 'MOBILE' (메인 툴바에서 선택, 메시지로 동기화)
+        let touchCapable = false;    // AUTO 판별용
+        let joystickActive = false;
+        let activeTouchId = null;
+        let joystickStick = { x: JOY.baseX, y: 0 };
+        let joyMove = { x: 0, y: 0 };
+
+        // 메인 월드(Parent)에서 동기화된 멀티플레이 유저 데이터
+        let remotePlayers = {};
+        let myId = "";
+
+        const devColors = {
+            dev1: [0, 255, 255], dev2: [255, 0, 150], dev3: [255, 165, 0], dev4: [155, 89, 182], dev5: [46, 204, 113]
+        };
+        const devNames = { dev1: "박선우", dev2: "최민성", dev3: "김도혁", dev4: "이예찬", dev5: "이하민" };
+
+        const portals = [
+            { id: 1, name: "스카이캐쳐", file: "minigame/skycatcher.html", icon: "☁️", dev: "dev1", x: 180, y: 150, size: 70 },
+            { id: 2, name: "핸드마스터", file: "minigame/handmaster.html", icon: "✌️", dev: "dev1", x: 320, y: 240, size: 70 },
+            { id: 3, name: "퍼펙트스택", file: "minigame/perfectstack.html", icon: "🧱", dev: "dev2", x: 620, y: 140, size: 70 },
+            { id: 4, name: "우주 대전", file: "minigame/space.html", icon: "🚀", dev: "dev2", x: 880, y: 140, size: 70 },
+            { id: 5, name: "짭켓로그", file: "minigame/fakemon_master.html", icon: "👾", dev: "dev2", x: 650, y: 280, size: 70 },
+            { id: 6, name: "에코 아카이브", file: "minigame/echo.html", icon: "📻", dev: "dev2", x: 850, y: 280, size: 70 },
+            { id: 7, name: "밈 피하기", file: "minigame/meme_dodge.html", icon: "🤪", dev: "dev3", x: 1180, y: 160, size: 70 },
+            { id: 8, name: "김씨 탈출 게임", file: "minigame/escape_kim.html", icon: "🏃", dev: "dev3", x: 1320, y: 260, size: 70 },
+            { id: 9, name: "지오메트리 대시", file: "minigame/geometry_dash.html", icon: "🔺", dev: "dev4", x: 250, y: 780, size: 70 },
+            { id: 10, name: "10초 버티면 감격스러운 게임", file: "minigame/survive_10s.html", icon: "⏱️", dev: "dev4", x: 450, y: 780, size: 70 },
+            { id: 14, name: "범퍼카", file: "minigame/bumpercar.html", icon: "🚗", dev: "dev4", x: 350, y: 900, size: 70 },
+            { id: 11, name: "지렁이게임", file: "minigame/worm_game.html", icon: "🪱", dev: "dev5", x: 1050, y: 720, size: 70 },
+            { id: 12, name: "fire and ice", file: "minigame/fire_and_ice.html", icon: "🔥❄️", dev: "dev5", x: 1300, y: 720, size: 70 },
+            { id: 13, name: "테트리스 상점", file: "minigame/tetris_shop.html", icon: "🧱🏪", dev: "dev5", x: 1175, y: 840, size: 70 }
+        ];
+
+        // 🚌 버스 터미널
+        const busTerminal = { name: "버스 터미널", icon: "🚌", x: 750, y: 575, size: 80, isTerminal: true };
+
+        // 🚪 돌아가기 포탈 (버스터미널 바로 옆)
+        const returnPortal = { name: "메인 월드로 돌아가기", icon: "🚪", x: 880, y: 575, size: 80, isReturn: true };
+
+        let activePortal = null;
+
+        // 닉네임 (메인과 동일한 규칙. 다른 플레이어가 보낸 값은 신뢰할 수 없으므로 항상 정리해서 사용)
+        const NICK_MAX = 8;
+        function sanitizeNick(v) {
+            if (typeof v !== 'string') return '';
+            const clean = v
+                .replace(/[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2066-\u2069]/g, '')
+                .replace(/\s+/g, ' ')
+                .trim();
+            return Array.from(clean).slice(0, NICK_MAX).join('');
+        }
+        function nickLabel(id, p) {
+            const nick = sanitizeNick(p && p.name);
+            if (id === myId) return nick || '나';
+            return nick || String(id).substring(0, 5);
+        }
+
+        // 키 상태 직접 추적 (p5 keyIsDown 은 포커스 전환 시 keyup을 놓쳐 키가 눌린 채 남을 수 있음)
+        const heldKeys = new Set();
+        function isHeld(code) { return heldKeys.has(code); }
+        window.addEventListener('keyup', (e) => { if (e.code) heldKeys.delete(e.code); });
+
+        // Enter / C 는 p5 keyPressed 대신 직접 처리 (키 상태 유실·IME keyCode 229 문제 회피)
+        window.addEventListener('keydown', (e) => {
+            if (e.code) heldKeys.add(e.code);
+            if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+            if (inSubGame || activeBusMenu) return;
+
+            if (e.code === 'KeyC') {
+                requestChangeShape();
+            } else if ((e.code === 'Enter' || e.code === 'NumpadEnter' || e.key === 'Enter') && activePortal && !isBusDriving) {
+                e.preventDefault();
+                executePortal();
+            }
+        });
+        window.addEventListener('blur', () => heldKeys.clear());
+
+        // 🌐 게임 iframe(스카이캐쳐)으로 메시지 전달
+        function forwardToGame(msg) {
+            const f = document.getElementById('game-frame');
+            if (f && f.contentWindow) { try { f.contentWindow.postMessage(msg, '*'); } catch (err) {} }
+        }
+
+        window.addEventListener('message', (e) => {
+            // 🌐 게임 iframe → 메인 월드 중계 (온라인 대전용 SC_ 메시지만, 스카이캐쳐 실행 중일 때만)
+            const gf = document.getElementById('game-frame');
+            if (gf && gf.contentWindow && e.source === gf.contentWindow) {
+                if (relayGame && e.data && typeof e.data.type === 'string' && e.data.type.indexOf('SC_') === 0 && window.parent !== window) {
+                    window.parent.postMessage(e.data, '*');
+                }
+                return;
+            }
+
+            // 메인 월드(Parent)로부터 동기화 데이터 수신 (부모에서 온 메시지만 허용)
+            if (e.source !== window.parent) return;
+            const t = e.data && e.data.type;
+            if (t === 'SYNC_PLAYERS') {
+                remotePlayers = e.data.players;
+                myId = e.data.myId;
+                if (e.data.inputMode && e.data.inputMode !== inputMode) {
+                    inputMode = e.data.inputMode;
+                    applyInputMode();
+                }
+                if (relayGame && inSubGame) forwardToGame(e.data);   // 접속자 목록을 스카이캐쳐에 전달
+            } else if (relayGame && typeof t === 'string' && t.indexOf('SC_') === 0) {
+                forwardToGame(e.data);                               // 연결 상태 / 상대 입력 전달
+            }
+        });
+
+        function computeCanvasSize() {
+            let w = Math.min(BASE_W, windowWidth);
+            return { w: w, h: w * (BASE_H / BASE_W) };
+        }
+
+        function windowResized() {
+            let size = computeCanvasSize();
+            resizeCanvas(size.w, size.h);
+            if (!joystickActive) joystickStick.y = joyBaseY();
+        }
+
+        function setup() {
+            let size = computeCanvasSize();
+            let canvas = createCanvas(size.w, size.h);
+            canvas.parent('lobby-container');
+            textAlign(CENTER, CENTER);
+
+            touchCapable = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+            applyInputMode();
+
+            for (let r = 0; r < ROWS; r++) {
+                tileMap[r] = [];
+                for (let c = 0; c < COLS; c++) {
+                    tileMap[r][c] = { type: 1, dev: null };
+                    if (r >= 8 && r <= 11) tileMap[r][c].type = 0;
+                }
+            }
+
+            let topZoneWidth = Math.floor(COLS / 3);
+            let topDevs = ['dev1', 'dev2', 'dev3'];
+            for (let i = 0; i < 3; i++) {
+                let startC = i * topZoneWidth; let endC = startC + topZoneWidth - 1; let devId = topDevs[i];
+                for (let r = 0; r <= 7; r++) {
+                    for (let c = startC; c <= endC; c++) {
+                        if ((r === 0 && c === startC) || (r === 0 && c === endC) || (r === 7 && c === startC) || (r === 7 && c === endC)) continue;
+                        tileMap[r][c].dev = devId;
+                        let isWall = (r === 0 && c > startC && c < endC) || (c === startC && r > 0 && r < 7) || (c === endC && r > 0 && r < 7) || (r === 7 && c > startC && c < endC);
+                        if (isWall) tileMap[r][c].type = 4;
+                        else { tileMap[r][c].type = (noise(c * 0.9, r * 0.9) > 0.82) ? 1 : 3; }
+                    }
+                }
+                let midC = Math.floor((startC + endC) / 2);
+                for (let offset = -1; offset <= 2; offset++) tileMap[7][midC + offset] = { type: 0, dev: null };
+            }
+
+            let bottomZoneWidth = Math.floor(COLS / 2);
+            let bottomDevs = ['dev4', 'dev5'];
+            for (let i = 0; i < 2; i++) {
+                let startC = i * bottomZoneWidth; let endC = startC + bottomZoneWidth - 1; let devId = bottomDevs[i];
+                for (let r = 12; r <= 19; r++) {
+                    for (let c = startC; c <= endC; c++) {
+                        if ((r === 12 && c === startC) || (r === 12 && c === endC) || (r === 19 && c === startC) || (r === 19 && c === endC)) continue;
+                        tileMap[r][c].dev = devId;
+                        let isWall = (r === 12 && c > startC && c < endC) || (c === startC && r > 12 && r < 19) || (c === endC && r > 12 && r < 19) || (r === 19 && c > startC && c < endC);
+                        if (isWall) tileMap[r][c].type = 4;
+                        else { tileMap[r][c].type = (noise(c * 0.9, r * 0.9) > 0.82) ? 1 : 3; }
+                    }
+                }
+                let midC = Math.floor((startC + endC) / 2);
+                for (let offset = -1; offset <= 2; offset++) tileMap[12][midC + offset] = { type: 0, dev: null };
+            }
+
+            // 터미널 및 돌아가기 포탈 구역 타일 세팅
+            let tCol = Math.floor(busTerminal.x / TILE_SIZE);
+            let tRow = Math.floor(busTerminal.y / TILE_SIZE);
+            for (let dr = -1; dr <= 1; dr++) {
+                for (let dc = -2; dc <= 3; dc++) {
+                    let r = tRow + dr; let c = tCol + dc;
+                    if (tileMap[r] && tileMap[r][c]) {
+                        if (dr === 1) tileMap[r][c].type = 4;
+                        else tileMap[r][c].type = 0;
+                    }
+                }
+            }
+            generateBusMenu();
+        }
+
+        function draw() {
+            background(15, 23, 42);
+
+            camX = lerp(camX, playerX - width / 2, 0.1);
+            camY = lerp(camY, playerY - height / 2, 0.1);
+            camX = constrain(camX, 0, Math.max(0, MAP_WIDTH - width));
+            camY = constrain(camY, 0, Math.max(0, MAP_HEIGHT - height));
+
+            push();
+            translate(-camX, -camY);
+
+            drawTiles();
+
+            if (isBusDriving) {
+                let d = dist(playerX, playerY, busTargetX, busTargetY);
+                if (d > busSpeed + 5) {
+                    let angle = Math.atan2(busTargetY - playerY, busTargetX - playerX);
+                    playerX += Math.cos(angle) * busSpeed;
+                    playerY += Math.sin(angle) * busSpeed;
+                } else {
+                    playerX = busTargetX; playerY = busTargetY;
+                    isBusDriving = false; busTargetX = null; busTargetY = null;
+                }
+            }
+
+            activePortal = null;
+
+            // 일반 게임 포탈
+            for (let portal of portals) {
+                let d = dist(playerX, playerY, portal.x, portal.y);
+                let col = devColors[portal.dev];
+                if (d < (PLAYER_RADIUS + portal.size / 2)) {
+                    fill(col[0], col[1], col[2], 120); stroke(255); strokeWeight(3);
+                    activePortal = portal;
+                } else {
+                    fill(20, 30, 50, 200); stroke(col[0], col[1], col[2], 200); strokeWeight(2);
+                }
+                ellipse(portal.x, portal.y, portal.size);
+                noStroke(); fill(255); textSize(24); text(portal.icon, portal.x, portal.y - 12);
+                textSize(10); text(portal.name, portal.x, portal.y + 16);
+            }
+
+            // 버스 터미널
+            let dt = dist(playerX, playerY, busTerminal.x, busTerminal.y);
+            if (dt < (PLAYER_RADIUS + busTerminal.size / 2)) {
+                fill(245, 158, 11, 150); stroke(255); strokeWeight(4); activePortal = busTerminal;
+            } else {
+                fill(30, 41, 59, 200); stroke(245, 158, 11, 200); strokeWeight(2.5);
+            }
+            ellipse(busTerminal.x, busTerminal.y, busTerminal.size);
+            noStroke(); fill(255); textSize(36); text(busTerminal.icon, busTerminal.x, busTerminal.y - 15);
+            textSize(12); fill(245, 158, 11); textStyle(BOLD); text(busTerminal.name, busTerminal.x, busTerminal.y + 22); textStyle(NORMAL);
+
+            // 🚪 돌아가기 포탈
+            let dr = dist(playerX, playerY, returnPortal.x, returnPortal.y);
+            if (dr < (PLAYER_RADIUS + returnPortal.size / 2)) {
+                fill(239, 68, 68, 180); stroke(255); strokeWeight(4); activePortal = returnPortal;
+            } else {
+                fill(127, 29, 29, 200); stroke(239, 68, 68, 200); strokeWeight(2.5);
+            }
+            ellipse(returnPortal.x, returnPortal.y, returnPortal.size);
+            noStroke(); fill(255); textSize(32); text(returnPortal.icon, returnPortal.x, returnPortal.y - 15);
+            textSize(11); fill(252, 165, 165); textStyle(BOLD); text("돌아가기", returnPortal.x, returnPortal.y + 22); textStyle(NORMAL);
+
+            if (!isBusDriving && !inSubGame) handleMovement();
+
+            // 🌐 미니게임 월드 내 멀티플레이 유저들
+            drawRemotePlayers();
+
+            // 내 아바타 (메인에서 정한 색/모양/이모트를 그대로 사용)
+            let me = remotePlayers[myId] || {};
+            drawAvatar(playerX, playerY, playerAngle, me.color || [255, 255, 255], nickLabel(myId, me), me.shape || 0, me.emote, me.emoteUntil);
+
+            // 부모(Main) 창으로 내 미니게임 위치 보냄
+            if (window.parent && window.parent !== window) {
+                window.parent.postMessage({
+                    type: 'MINIGAME_MOVE',
+                    x: playerX,
+                    y: playerY,
+                    angle: playerAngle
+                }, '*');
+            }
+
+            pop();
+
+            if (activePortal && !isBusDriving && !inSubGame) drawInteractionBar();
+            if (isMobile && !isBusDriving && !activeBusMenu && !inSubGame) drawMobileControls();
+        }
+
+        // sketch.js 의 drawPlayers 와 동일한 모양 (+ 이모트 말풍선)
+        function drawAvatar(x, y, angle, col, label, shape, emote, emoteUntil) {
+            const R = PLAYER_RADIUS;
+            push();
+            translate(x, y);
+            stroke(0); strokeWeight(2);
+            fill(col[0], col[1], col[2]);
+            if (shape === 1) {
+                rectMode(CENTER);
+                rect(0, 0, R * 2, R * 2, 6);
+            } else {
+                ellipse(0, 0, R * 2, R * 2);
+            }
+
+            push();
+            rotate(angle);
+            stroke(255); strokeWeight(3);
+            line(0, 0, R + 8, 0);
+            fill(255); noStroke();
+            triangle(R + 8, -4, R + 14, 0, R + 8, 4);
+            pop();
+
+            fill(255); noStroke();
+            textAlign(CENTER, BASELINE);
+            textSize(12); textStyle(BOLD);
+            text(label, 0, -R - 8);
+
+            if (emote && Number(emoteUntil || 0) > Date.now()) {
+                textSize(24);
+                text(emote, 0, -R - 34);
+            }
+            pop();
+        }
+
+        function drawRemotePlayers() {
+            for (let pid in remotePlayers) {
+                if (pid === myId) continue;
+                let p = remotePlayers[pid];
+                // 미니게임 월드에 입장해 있는 유저들만 표시
+                if (p && p.inMinigame && p.minigameX !== undefined && p.minigameY !== undefined) {
+                    drawAvatar(p.minigameX, p.minigameY, p.angle || 0, p.color || [255, 255, 255], nickLabel(pid, p), p.shape || 0, p.emote, p.emoteUntil);
+                }
+            }
+        }
+
+        function drawTiles() {
+            for (let r = 0; r < ROWS; r++) {
+                for (let c = 0; c < COLS; c++) {
+                    let tile = tileMap[r][c]; let x = c * TILE_SIZE; let y = r * TILE_SIZE;
+                    if (tile.type === 1) { fill(20, 60, 40); noStroke(); rect(x, y, TILE_SIZE, TILE_SIZE); }
+                    else if (tile.type === 0) { fill(45, 55, 70); stroke(60, 70, 90); rect(x, y, TILE_SIZE, TILE_SIZE); }
+                    else if (tile.type === 3) { let cCol = devColors[tile.dev]; fill(cCol[0], cCol[1], cCol[2], 50); stroke(cCol[0], cCol[1], cCol[2], 80); rect(x, y, TILE_SIZE, TILE_SIZE); }
+                    else if (tile.type === 4) { fill(150, 70, 50); stroke(90, 40, 30); strokeWeight(2); rect(x, y, TILE_SIZE, TILE_SIZE); }
+                }
+            }
+        }
+
+        // sketch.js 와 동일한 이동 방식 (속도 4, 대각선 정규화)
+        function handleMovement() {
+            if (activeBusMenu) return;
+
+            let mx = 0, my = 0;
+            if (isHeld('ArrowLeft') || isHeld('KeyA')) mx -= 1;
+            if (isHeld('ArrowRight') || isHeld('KeyD')) mx += 1;
+            if (isHeld('ArrowUp') || isHeld('KeyW')) my -= 1;
+            if (isHeld('ArrowDown') || isHeld('KeyS')) my += 1;
+
+            if (isMobile && (joyMove.x !== 0 || joyMove.y !== 0)) {
+                mx = joyMove.x;
+                my = joyMove.y;
+            }
+
+            let dx = 0, dy = 0;
+            if (mx !== 0 || my !== 0) {
+                playerAngle = Math.atan2(my, mx);
+                let len = Math.sqrt(mx * mx + my * my);
+                if (len > 1) { mx /= len; my /= len; }
+                dx = mx * PLAYER_SPEED;
+                dy = my * PLAYER_SPEED;
+            }
+
+            let nextX = constrain(playerX + dx, PLAYER_RADIUS, MAP_WIDTH - PLAYER_RADIUS);
+            let nextY = constrain(playerY + dy, PLAYER_RADIUS, MAP_HEIGHT - PLAYER_RADIUS);
+
+            if (canMoveTo(nextX, playerY)) playerX = nextX;
+            if (canMoveTo(playerX, nextY)) playerY = nextY;
+        }
+
+        function canMoveTo(x, y) {
+            let radius = PLAYER_RADIUS - 2;
+            let pointsToTest = [{x: x - radius, y: y - radius}, {x: x + radius, y: y - radius}, {x: x - radius, y: y + radius}, {x: x + radius, y: y + radius}];
+            for (let pt of pointsToTest) {
+                let col = Math.floor(pt.x / TILE_SIZE), row = Math.floor(pt.y / TILE_SIZE);
+                if (row < 0 || row >= ROWS || col < 0 || col >= COLS) return false;
+                let tileType = tileMap[row][col].type;
+                if (tileType === 1 || tileType === 4) return false;
+            }
+            return true;
+        }
+
+        // sketch.js 의 drawPortalUI 와 같은 위치/크기
+        function drawInteractionBar() {
+            let barW = Math.min(width - 20, 440);
+            fill(15, 23, 42, 230);
+            stroke(0, 255, 255);
+            if (activePortal.isTerminal) stroke(245, 158, 11);
+            if (activePortal.isReturn) stroke(239, 68, 68);
+            strokeWeight(2);
+            rect(width / 2 - barW / 2, 20, barW, 45, 20);
+
+            noStroke(); textSize(13); textAlign(CENTER, CENTER);
+            if (activePortal.isReturn) {
+                fill(252, 165, 165);
+                text("🚪 [메인 월드로 돌아가기] 포탈에 위치함", width / 2, 33);
+                fill(255); textSize(11); text("👉 [Enter] 또는 [나가기]를 누르면 메인 월드로 돌아갑니다.", width / 2, 50);
+            } else if (activePortal.isTerminal) {
+                fill(245, 158, 11);
+                text(`🚌 [${activePortal.name}]에 도착했습니다!`, width / 2, 33);
+                fill(255); textSize(11); text("👉 [Enter] 또는 [입장]을 눌러 빠른 이동 선택!", width / 2, 50);
+            } else {
+                fill(255, 255, 0);
+                text(`🎮 [${activePortal.name}] 월드 발견!`, width / 2, 33);
+                fill(255); textSize(11); text("👉 [Enter] 또는 [입장]을 누르면 게임 실행!", width / 2, 50);
+            }
+        }
+
+        // 🎉 하단 이모트 바 좌표 (가운데 정렬, 캔버스 맨 아래)
+        function emoteBarRects() {
+            const total = EMOTE_BAR_ITEMS.reduce((s, b) => s + b.w, 0) + EMOTE_BAR_GAP * (EMOTE_BAR_ITEMS.length - 1);
+            let x = width / 2 - total / 2;
+            const y = height - EMOTE_BAR_BOTTOM - EMOTE_BAR_H;
+            return EMOTE_BAR_ITEMS.map(b => {
+                const r = { key: b.key, label: b.label, x: x, y: y, w: b.w, h: EMOTE_BAR_H };
+                x += b.w + EMOTE_BAR_GAP;
+                return r;
+            });
+        }
+
+        // 조이스틱(왼쪽 아래)과 입장 버튼(오른쪽 위)에 겹치지 않는 하단 중앙 바
+        function drawEmoteBar() {
+            push();
+            rectMode(CORNER);
+            textAlign(CENTER, CENTER);
+            textStyle(BOLD);
+            for (const r of emoteBarRects()) {
+                fill(15, 23, 42, 170);
+                stroke(r.key === 'shape' ? color(0, 255, 255, 200) : color(255, 255, 255, 120));
+                strokeWeight(1.5);
+                rect(r.x, r.y, r.w, r.h, 8);
+                fill(255); noStroke(); textSize(11);
+                text(r.label, r.x + r.w / 2, r.y + r.h / 2);
+            }
+            pop();
+        }
+
+        // sketch.js 의 drawJoystickHUD 와 같은 배치 + 하단 이모트 바
+        function drawMobileControls() {
+            push();
+            let by = joyBaseY();
+            fill(255, 255, 255, 80); stroke(255, 255, 255, 200); strokeWeight(3);
+            ellipse(JOY.baseX, by, JOY.r * 2);
+            fill(0, 255, 255, 200); noStroke();
+            ellipse(joystickStick.x, joystickStick.y, JOY.stickR * 2);
+
+            if (activePortal) {
+                let b = actionBtn();
+                fill(236, 72, 153, 220); stroke(255); strokeWeight(2);
+                ellipse(b.x, b.y, b.r * 2);
+                fill(255); noStroke(); textSize(14); textStyle(BOLD);
+                textAlign(CENTER, CENTER);
+                text(activePortal.isReturn ? "나가기" : "입장", b.x, b.y);
+            }
+            pop();
+
+            drawEmoteBar();
+        }
+
+        // 입력 모드 적용: 모드가 바뀌면 조이스틱 상태 초기화
+        function applyInputMode() {
+            isMobile = (inputMode === 'MOBILE') || (inputMode === 'AUTO' && touchCapable);
+            joystickActive = false;
+            activeTouchId = null;
+            joyMove = { x: 0, y: 0 };
+            joystickStick.x = JOY.baseX;
+            joystickStick.y = (typeof height === 'number') ? joyBaseY() : 0;
+        }
+
+        // 터치가 있으면 터치, 없으면 마우스를 포인터로 사용
+        function pointerList() {
+            if (touches.length > 0) return touches;
+            if (mouseIsPressed) return [{ x: mouseX, y: mouseY, id: 'mouse' }];
+            return [];
+        }
+
+        // 이모트 바에서 눌린 버튼 찾기 (없으면 null)
+        function emoteBarHit(px, py) {
+            for (const r of emoteBarRects()) {
+                if (px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) return r;
+            }
+            return null;
+        }
+
+        function touchStarted() {
+            if (!isMobile || activeBusMenu || inSubGame) return;
+            for (let t of pointerList()) {
+                let b = actionBtn();
+                if (activePortal && dist(t.x, t.y, b.x, b.y) < b.r) { executePortal(); return false; }
+
+                const hit = emoteBarHit(t.x, t.y);
+                if (hit) {
+                    if (hit.key === 'shape') requestChangeShape();
+                    else sendEmote(hit.key);
+                    return false;
+                }
+
+                if (!joystickActive && dist(t.x, t.y, JOY.baseX, joyBaseY()) < JOY.r + 20) {
+                    joystickActive = true;
+                    activeTouchId = t.id;
+                }
+            }
+            return false;
+        }
+
+        function touchMoved() {
+            if (!isMobile || activeBusMenu || !joystickActive) return false;
+            for (let t of pointerList()) {
+                if (t.id !== activeTouchId) continue;
+                let by = joyBaseY();
+                let d = dist(t.x, t.y, JOY.baseX, by);
+                let a = Math.atan2(t.y - by, t.x - JOY.baseX);
+                let r = Math.min(d, JOY.r);
+                joystickStick.x = JOY.baseX + Math.cos(a) * r;
+                joystickStick.y = by + Math.sin(a) * r;
+                joyMove.x = (joystickStick.x - JOY.baseX) / JOY.r;
+                joyMove.y = (joystickStick.y - by) / JOY.r;
+            }
+            return false;
+        }
+
+        function touchEnded() {
+            // 조이스틱을 잡고 있던 손가락(또는 마우스)이 떨어졌을 때만 초기화
+            if (!pointerList().some(t => t.id === activeTouchId)) {
+                joystickActive = false;
+                activeTouchId = null;
+                joystickStick.x = JOY.baseX;
+                joystickStick.y = joyBaseY();
+                joyMove = { x: 0, y: 0 };
+            }
+            return false;
+        }
+
+        function mousePressed(event) {
+            // 캔버스 위 클릭만 게임 입력으로 사용 (버튼 등 DOM 클릭은 무시)
+            if (event && event.target && event.target.tagName !== 'CANVAS') return;
+            touchStarted();
+        }
+        function mouseDragged() { touchMoved(); }
+        function mouseReleased() { touchEnded(); }
+
+        // 모양 데이터는 메인이 가지고 있으므로 메시지로 요청
+        function requestChangeShape() {
+            if (window.parent && window.parent !== window) {
+                window.parent.postMessage({ type: 'CHANGE_SHAPE' }, '*');
+            }
+        }
+
+        // 🎉 이모트: 메인이 값을 저장하고 모든 참가자에게 동기화함
+        function sendEmote(emoji) {
+            if (window.parent && window.parent !== window) {
+                window.parent.postMessage({ type: 'EMOTE', emoji: emoji }, '*');
+            }
+        }
+
+        function executePortal() {
+            if (!activePortal) return;
+            if (activePortal.isReturn) {
+                if (window.parent && window.parent !== window) window.parent.postMessage({ type: 'RETURN_TO_MAIN' }, '*');
+            } else if (activePortal.isTerminal) { openBusMenu(); }
+            else { playFileGame(activePortal.file); }
+        }
+
+        function playFileGame(url) {
+            savedPlayerX = playerX; savedPlayerY = playerY;
+            inSubGame = true;
+            relayGame = /skycatcher|perfectstack|geometry_dash/i.test(url); //미니게임 멀티플레이 정규식 [아주 중요]
+            joystickActive = false; joyMove = { x: 0, y: 0 };
+            joystickStick.x = JOY.baseX; joystickStick.y = joyBaseY();
+            document.getElementById('game-container').style.display = 'block';
+            document.getElementById('back-btn').classList.add('show');
+
+            // 게임이 로드되면 키보드 포커스를 iframe으로 넘겨서 스페이스 등 키 입력이 바로 들어가게 함
+            const frame = document.getElementById('game-frame');
+            frame.onload = () => {
+                if (!inSubGame) return;
+                frame.focus();
+                try { frame.contentWindow.focus(); } catch (e) {}
+            };
+            frame.src = url;
+        }
+
+        function closeGame() {
+            if (!inSubGame) return;
+            inSubGame = false;
+
+            // 🌐 온라인 대전 중이었다면 메인 월드의 대전 상태 / 직접 연결도 정리 (상대에게는 이탈로 전달됨)
+            if (relayGame && window.parent && window.parent !== window) {
+                window.parent.postMessage({ type: 'SC_RESET' }, '*');
+            }
+            relayGame = false;
+
+            document.getElementById('game-container').style.display = 'none';
+            document.getElementById('back-btn').classList.remove('show');
+            const frame = document.getElementById('game-frame');
+            frame.onload = null;
+            frame.src = 'about:blank';
+            playerX = savedPlayerX; playerY = savedPlayerY;
+
+            // 숨겨진 게임 iframe 이 포커스를 쥐고 있으면 키 입력이 사라지므로 되돌림
+            heldKeys.clear();
+            if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+            window.focus();
+        }
+
+        // 뒤로가기 버튼: pointerdown 으로 바로 반응 (터치/마우스 공통)
+        document.getElementById('back-btn').addEventListener('pointerdown', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            closeGame();
+        });
+        // 키보드 Esc 로도 돌아가기
+        window.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && inSubGame) closeGame();
+        });
+
+        function generateBusMenu() {
+            let content = document.getElementById('destinations-content');
+            let groupedPortals = { dev1: [], dev2: [], dev3: [], dev4: [], dev5: [] };
+            portals.forEach(p => groupedPortals[p.dev].push(p));
+
+            let html = "";
+            for (let devId in groupedPortals) {
+                if (groupedPortals[devId].length === 0) continue;
+                html += `<div class="destination-group"><h3>${devNames[devId]} (${devId.toUpperCase()})</h3><div class="destination-list">`;
+                groupedPortals[devId].forEach(p => {
+                    html += `<div class="destination-item" onclick="startBusDrive(${p.id})"><span class="icon">${p.icon}</span><span>${p.name}</span></div>`;
+                });
+                html += `</div></div>`;
+            }
+            content.innerHTML = html;
+        }
+
+        function openBusMenu() { activeBusMenu = true; document.getElementById('bus-terminal-menu').style.display = 'block'; }
+        function closeBusMenu() { activeBusMenu = false; document.getElementById('bus-terminal-menu').style.display = 'none'; }
+
+        function startBusDrive(portalId) {
+            closeBusMenu();
+            let targetPortal = portals.find(p => p.id === portalId);
+            if (!targetPortal) return;
+            busTargetX = targetPortal.x; busTargetY = targetPortal.y + 15; isBusDriving = true;
+        }
+    </script>
+</body>
+</html>

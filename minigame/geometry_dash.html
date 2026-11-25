@@ -1,0 +1,819 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Geometry Dash Simulator</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.6.0/p5.min.js"></script>
+<style>
+html, body { margin: 0; padding: 0; }
+body {
+  box-sizing: border-box; height: 100vh;
+  display: flex; justify-content: center; align-items: center;
+  background: #f0f0f0; overflow: hidden;
+  touch-action: none; user-select: none; -webkit-user-select: none;
+}
+#game-container { box-shadow: 0 0 20px rgba(0,0,0,0.15); border-radius: 10px; overflow: hidden; line-height: 0; }
+canvas { display: block; }
+</style>
+</head>
+<body>
+<div id="game-container"></div>
+<script>
+/*
+ * Geometry Dash
+ *  - 혼자하기: 기존과 동일 (5 스테이지, 죽으면 해당 스테이지 재시작)
+ *  - 같이하기: 800x400 판 2개를 위(나) / 아래(상대)로 배치
+ *      · 장애물은 (스테이지, 프레임) 으로 결정되는 고정 스케줄이라 장애물 목록을 보낼 필요가 없음
+ *      · 각자 자기 판을 고정 스텝(60Hz)으로 시뮬레이션, 내 상태를 약 30Hz 로 상대에게 전송
+ *      · 상대 판은 받은 상태를 그리고, 사이사이는 짧게 예측
+ *      · 죽으면 탈락, 5 스테이지 클리어하면 즉시 승리
+ *      · 승패: 둘 다 탈락 → 진행률 비교 / 한쪽 탈락 후 남은 쪽이 탈락자 진행률을 넘으면 즉시 승리
+ */
+const GeoDashGame = (() => {
+  let instance = null;
+
+  function sketch(p) {
+    // =====================================================
+    // 상수
+    // =====================================================
+    const W = 800, H = 400;                              // 한 판 (혼자하기 / 같이하기 판 동일)
+    const SIDE_W = 100, DIV_H = 3;                       // 같이하기: 왼쪽 이름/게이지 열 너비 / 상하 구분선 (최소)
+    const VIEW_TOP = 50, VIEW_H = 250;                   // 같이하기: 실제 플레이 띠 (천장선 50 ~ 바닥선 300)
+    const MATCH_W = SIDE_W + W, MATCH_H = VIEW_H + DIV_H + VIEW_H;
+    const OPP_Y = VIEW_H + DIV_H;                        // 상대 판 y 위치
+    const TOP_HIDDEN = 42, MAX_K = 2.2;
+    const STAGE_LEN = 1500, LAST_STAGE = 5, STEP_MS = 1000 / 60;
+    const GRAVITY = 0.6, JUMP = -11, PX = 150;           // PX: 플레이어 x (고정)
+    const NICK_MAX = 8;
+    const INVITE_TIMEOUT = 15000, DECLINE_COOLDOWN = 10000, LINK_TIMEOUT = 15000, START_TIMEOUT = 25000;
+    const COUNTDOWN_MS = 3000, SNAP_MS = 33, OPP_TIMEOUT_MS = 8000;
+    const BG = [[10,20,60],[50,10,40],[10,50,30],[60,40,10],[40,10,60]];
+
+    // 스테이지 장애물 스케줄: f = 등장 프레임, ox = 등장 x 오프셋
+    const SCHED = {
+      1: [{t:'spike',f:100,h:32,dir:1},{t:'block',f:250,y:270,w:60,h:60},{t:'ring',f:450,y:200},
+          {t:'spike',f:490,h:35,dir:1},{t:'block',f:750,y:270,w:80,h:60},{t:'block',f:750,ox:80,y:230,w:80,h:140}],
+      2: [{t:'spike',f:80,h:40,dir:1},{t:'spike',f:200,h:30,dir:1},{t:'spike',f:200,ox:30,h:30,dir:1},
+          {t:'block',f:450,y:240,w:100,h:20},{t:'ring',f:490,y:160},{t:'spike',f:750,h:30,dir:1},
+          {t:'spike',f:750,ox:35,h:30,dir:1},{t:'spike',f:750,ox:70,h:30,dir:1}],
+      3: [{t:'portal',f:50,mode:'SHIP'},{t:'block',f:200,y:100,w:80,h:100},{t:'block',f:400,y:250,w:80,h:100},
+          {t:'block',f:600,y:80,w:60,h:60},{t:'block',f:600,y:270,w:60,h:60},{t:'spike',f:850,h:45,dir:1},
+          {t:'portal',f:1100,mode:'CUBE'}],
+      4: [{t:'pad',f:100,y:295,tgt:-1},{t:'spike',f:250,h:35,dir:-1},{t:'block',f:450,y:100,w:100,h:30},
+          {t:'pad',f:650,y:55,tgt:1},{t:'spike',f:850,h:35,dir:1}],
+      5: [{t:'portal',f:40,mode:'SHIP'},{t:'pad',f:200,y:295,tgt:-1},{t:'block',f:350,y:80,w:40,h:60},
+          {t:'pad',f:550,y:55,tgt:1},{t:'portal',f:750,mode:'CUBE'},{t:'spike',f:900,h:32,dir:1},
+          {t:'ring',f:900,ox:40,y:220},{t:'spike',f:900,ox:80,h:32,dir:1}]
+    };
+
+    // 버튼 / 목록 레이아웃 (논리 좌표)
+    const BTN_SOLO = {x:300,y:200,w:200,h:56}, BTN_ONLINE = {x:300,y:275,w:200,h:56};
+    const SOLO_RETRY = {x:230,y:250,w:150,h:50}, SOLO_MENU = {x:420,y:250,w:150,h:50};
+    const RESULT_BTN = {x:SIDE_W + (W-200)/2,y:MATCH_H/2+40,w:200,h:50};
+    const LIST_Y = 100, ROW_H = 50, ROW_GAP = 6, ROWS_VIS = 3;
+    const rowRect = i => ({ x:150, y:LIST_Y + i*(ROW_H+ROW_GAP), w:500, h:ROW_H });
+    const invRect = i => { const r = rowRect(i); return { x:r.x+r.w-100, y:r.y+8, w:84, h:34 }; };
+    const SCROLL_UP = {x:300,y:272,w:90,h:26}, SCROLL_DN = {x:410,y:272,w:90,h:26};
+    const BACK_RECT = {x:300,y:330,w:200,h:40};
+    const ACCEPT_RECT = {x:230,y:300,w:150,h:46}, DECLINE_RECT = {x:420,y:300,w:150,h:46}, CANCEL_RECT = {x:300,y:300,w:200,h:46};
+
+    // =====================================================
+    // 상태
+    // =====================================================
+    let gameState = 'START';   // START | SOLO | ONLINE_LIST | ONLINE_LINK | MATCH | MATCH_OVER
+    let solo = null, me = null, opp = null;
+    let L = { lw: W, lh: H, k: 1, pw: W, ph: H };
+    let acc = 0;
+    const inp = { hold: false };
+
+    const net = {
+      on: false, remote: {}, myId: '',
+      inviting: null, incoming: null, seenInv: {}, declined: {},
+      toast: null, scroll: 0, role: '', oppId: '', link: 'none', linkT0: 0
+    };
+    const match = { startAt: 0, names: ['', ''], lastRecv: 0, lastSend: 0, lastKey: '', result: '', reason: '' };
+
+    // =====================================================
+    // 유틸
+    // =====================================================
+    const inFrame = () => window.parent !== window;
+    function toMain(msg) { if (inFrame()) { try { window.parent.postMessage(msg, '*'); } catch (e) {} } }
+    function netSend(obj) { toMain({ type: 'SC_SEND', data: obj }); }
+    const isNum = v => typeof v === 'number' && Number.isFinite(v);
+    const isInt = v => Number.isInteger(v);
+    const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+    const r1 = v => Math.round(v * 10) / 10;
+    const r2 = v => Math.round(v * 100) / 100;
+    const inRect = (mx, my, r) => mx >= r.x && mx <= r.x + r.w && my >= r.y && my <= r.y + r.h;
+
+    function sanitizeNick(v) {
+      if (typeof v !== 'string') return '';
+      const clean = v.replace(/[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2066-\u2069]/g, '')
+                     .replace(/\s+/g, ' ').trim();
+      return Array.from(clean).slice(0, NICK_MAX).join('');
+    }
+    function nickLabel(id, pl) {
+      const nick = sanitizeNick(pl && pl.name);
+      if (id === net.myId) return nick || '나';
+      return nick || String(id).substring(0, 5);
+    }
+    const labelOf = id => nickLabel(id, net.remote[id]);
+    function showToast(msg) { net.toast = { msg, until: Date.now() + 2800 }; }
+
+    // =====================================================
+    // 판 (혼자하기 / 내 판 / 상대 판 공용)
+    // =====================================================
+    function newBoard(lv = 1) {
+      return { lv, lf: 0, st: 0, y: 285, vy: 0, ang: 0, gnd: true, md: 'CUBE', gd: 1, cu: new Set() };
+    }
+    // 스테이지 시작 상태로 되돌림 (st: 0 진행 / 1 탈락 / 2 클리어)
+    function resetStage(b) { Object.assign(b, { lf: 0, st: 0, y: 285, vy: 0, ang: 0, gnd: true, md: 'CUBE', gd: 1, cu: new Set() }); }
+    const spd = b => 5 + b.lv * 1.2;
+    const prog = b => (b.lv - 1) * STAGE_LEN + Math.min(b.lf, STAGE_LEN);   // 0 ~ 7500
+    const pctOf = b => Math.min(100, Math.floor(prog(b) / 75));
+
+    // 현재 프레임에 화면에 있는 장애물 (x 는 프레임으로부터 계산)
+    function active(b) {
+      const out = [], sp = spd(b);
+      SCHED[b.lv].forEach((o, i) => {
+        if (o.f > b.lf || (o.t === 'ring' && b.cu.has(i))) return;
+        const x = W + (o.ox || 0) - sp * (b.lf - o.f);
+        if (x < -120 || x > W + 120) return;
+        out.push(Object.assign({}, o, { i, x }));
+      });
+      return out;
+    }
+
+    function rectTri(rx, ry, rw, rh, x1, y1, x2, y2, x3, y3) {
+      if (rx + rw < Math.min(x1, x2, x3) || rx > Math.max(x1, x2, x3) ||
+          ry + rh < Math.min(y1, y2, y3) || ry > Math.max(y1, y2, y3)) return false;
+      const inside = (x, y) => x >= rx && x <= rx + rw && y >= ry && y <= ry + rh;
+      return inside(x1, y1) || inside(x2, y2) || inside(x3, y3);
+    }
+
+    function collide(b, hold) {
+      for (const o of active(b)) {
+        if (o.t === 'spike') {
+          const tri = o.dir === 1 ? [o.x-15, 300, o.x, 300-o.h, o.x+15, 300] : [o.x-15, 50, o.x, 50+o.h, o.x+15, 50];
+          if (rectTri(PX-15, b.y-15, 30, 30, ...tri)) { b.st = 1; return; }
+        } else if (o.t === 'block') {
+          const top = o.y - o.h/2, bot = o.y + o.h/2;
+          if (PX+15 > o.x-o.w/2 && PX-15 < o.x+o.w/2 && b.y+15 > top && b.y-15 < bot) {
+            if (b.gd === 1 && b.y - b.vy <= top + 3 && b.vy >= 0) { b.y = top-15; b.vy = 0; b.gnd = true; }
+            else if (b.gd === -1 && b.y - b.vy >= bot - 3 && b.vy <= 0) { b.y = bot+15; b.vy = 0; b.gnd = true; }
+            else { b.st = 1; return; }
+          }
+        } else if (o.t === 'ring') {
+          if (hold && Math.hypot(PX - o.x, b.y - o.y) < 35) { b.vy = JUMP * 0.9 * b.gd; b.gnd = false; b.cu.add(o.i); }
+        } else if (o.t === 'portal') {
+          if (Math.abs(PX - o.x) < 20) { b.md = o.mode; if (o.mode === 'SHIP') b.ang = 0; }
+        } else if (o.t === 'pad') {
+          if (Math.abs(PX - o.x) < 25 && Math.abs(b.y - o.y) < 25) { b.gd = o.tgt; b.vy = 2 * o.tgt; }
+        }
+      }
+    }
+
+    // 물리 한 스텝 (60Hz 고정). ghost: 상대 판 예측용 (충돌/탈락 판정 없이 움직임만)
+    function step(b, hold, ghost) {
+      if (b.st) return;
+      b.lf++;
+      if (b.md === 'SHIP') {
+        b.vy = clamp(b.vy + (hold ? -0.8 : 0.5) * b.gd, -6, 6);
+        b.y += b.vy; b.gnd = false;
+        b.ang = b.vy * 4 * b.gd;
+      } else {
+        if (hold && b.gnd) { b.vy = JUMP * b.gd; b.gnd = false; }
+        b.vy += GRAVITY * b.gd; b.y += b.vy;
+        if (!b.gnd) b.ang += 5 * b.gd;
+      }
+      if (b.gd === 1) {
+        if (b.y >= 285) { b.y = 285; b.vy = 0; b.gnd = true; }
+        if (b.y <= 65 && b.md === 'SHIP') { b.y = 65; b.vy = 0; }
+      } else {
+        if (b.y <= 65) { b.y = 65; b.vy = 0; b.gnd = true; }
+        if (b.y >= 285 && b.md === 'SHIP') { b.y = 285; b.vy = 0; }
+      }
+      if (b.gnd && b.md === 'CUBE') b.ang = Math.round(b.ang / 90) * 90;
+      if (!ghost) collide(b, hold);
+      if (b.st) return;
+      if (b.lf > STAGE_LEN) {
+        if (b.lv < LAST_STAGE) { b.lv++; resetStage(b); }
+        else { b.st = 2; }
+      }
+    }
+
+    // =====================================================
+    // 그리기 (판 하나)
+    // =====================================================
+    function drawObs(o) {
+      p.push();
+      if (o.t === 'spike') {
+        p.stroke(255, 50, 50); p.fill(255, 0, 100);
+        if (o.dir === 1) p.triangle(o.x-15, 300, o.x, 300-o.h, o.x+15, 300);
+        else p.triangle(o.x-15, 50, o.x, 50+o.h, o.x+15, 50);
+      } else if (o.t === 'block') {
+        p.stroke(0, 255, 255); p.fill(20, 40, 80); p.rect(o.x, o.y, o.w, o.h, 3);
+      } else if (o.t === 'ring') {
+        p.stroke(255, 255, 0); p.fill(255, 200, 0, 100); p.ellipse(o.x, o.y, 30, 30);
+      } else if (o.t === 'portal') {
+        p.noStroke(); p.fill(o.mode === 'SHIP' ? [0, 255, 100, 180] : [255, 0, 150, 180]);
+        p.rect(o.x, 175, 20, 250, 10);
+      } else {
+        p.noStroke(); p.fill(180, 50, 255); p.rect(o.x, o.y, 30, 8);
+      }
+      p.pop();
+    }
+
+    function drawPlayer(b) {
+      p.push();
+      p.translate(PX, b.y); p.rotate(p.radians(b.ang)); p.strokeWeight(2);
+      if (b.md === 'CUBE') {
+        p.stroke(0, 255, 255); p.fill(0, 150, 255); p.rect(0, 0, 30, 30, 4);
+        p.fill(255); p.rect(-5, -5*b.gd, 6, 6); p.rect(5, -5*b.gd, 6, 6);
+      } else {
+        p.stroke(0, 255, 100); p.fill(0, 200, 100); p.rect(0, 5*b.gd, 32, 16, 4);
+        p.fill(255, 255, 0); p.triangle(-10, -5*b.gd, 10, -5*b.gd, 0, -15*b.gd);
+      }
+      p.pop();
+    }
+
+    // 판 하나를 (0, y0) 위치에 그림. 800x400 영역 밖은 잘라냄
+    function drawWorld(b, y0, hud = true, band = false) {
+      const ctx = p.drawingContext, sp = spd(b);
+      p.push();
+      p.translate(0, band ? y0 - VIEW_TOP : y0);
+      ctx.save(); ctx.beginPath();
+      if (band) ctx.rect(0, VIEW_TOP, W, VIEW_H); else ctx.rect(0, 0, W, H);
+      ctx.clip();
+      p.noStroke(); p.fill(...BG[b.lv - 1]); p.rect(0, 0, W, H);
+
+      p.stroke(255, 255, 255, 20); p.strokeWeight(1);
+      const scroll = (b.lf * sp) % 40;
+      for (let x = -scroll; x < W; x += 40) p.line(x, 0, x, 300);
+      p.stroke(255, 100); p.strokeWeight(3);
+      p.line(0, 300, W, 300); p.line(0, 50, W, 50);
+
+      p.rectMode(p.CENTER);
+      for (const o of active(b)) drawObs(o);
+      drawPlayer(b);
+      p.rectMode(p.CORNER);
+
+      if (hud) {
+        const ratio = Math.min(1, b.lf / STAGE_LEN);
+        p.noStroke(); p.fill(50); p.rect(W/2 - 150, 21, 300, 8, 5);
+        p.fill(0, 255, 100); p.rect(W/2 - 150, 21, 300 * ratio, 8, 5);
+        p.fill(255); p.textAlign(p.CENTER, p.CENTER); p.textSize(12); p.textStyle(p.NORMAL);
+        p.text(`STAGE ${b.lv} / 5  [ ${Math.floor(ratio * 100)}% ]`, W/2, 40);
+      }
+      ctx.restore();
+      p.pop();
+    }
+
+    function drawButton(r, label, col, fs = 18) {
+      p.push();
+      p.noStroke(); p.fill(col[0], col[1], col[2]);
+      p.rect(r.x, r.y, r.w, r.h, 12);
+      p.fill(255); p.textStyle(p.NORMAL); p.textAlign(p.CENTER, p.CENTER); p.textSize(fs);
+      p.text(label, r.x + r.w/2, r.y + r.h/2);
+      p.pop();
+    }
+    function dim(a = 180) { p.push(); p.noStroke(); p.fill(0, a); p.rect(0, 0, W, H); p.pop(); }
+    function drawCenterText(txt, x, y, size, col = [255,255,255], style = p.NORMAL) {
+      p.push(); p.noStroke(); p.fill(...col); p.textAlign(p.CENTER, p.CENTER);
+      p.textStyle(style); p.textSize(size); p.text(txt, x, y); p.pop();
+    }
+
+    // =====================================================
+    // 혼자하기
+    // =====================================================
+    function startSolo() {
+      solo = newBoard(1); acc = 0;
+      gameState = 'SOLO';
+    }
+    function soloRetry() {
+      if (solo.st === 2) startSolo();   // 클리어 후: 처음부터
+      else resetStage(solo);            // 탈락 후: 해당 스테이지 재시작 (기존 동작)
+    }
+
+    function drawSolo() {
+      drawWorld(solo, 0);
+      if (!solo.st) return;
+      dim(180);
+      if (solo.st === 1) {
+        drawCenterText('💥 ATTEMPT FAILED', W/2, 130, 40, [255, 50, 50], p.BOLD);
+        drawCenterText('STAGE ' + solo.lv + ' · 다시하기 또는 스페이스로 재시작', W/2, 185, 15);
+      } else {
+        drawCenterText('👑 ALL 5 STAGES DESTROYED 👑', W/2, 130, 36, [255, 215, 0], p.BOLD);
+        drawCenterText('처음부터 다시 도전할 수 있어요', W/2, 185, 15);
+      }
+      drawButton(SOLO_RETRY, solo.st === 2 ? '처음부터' : '다시하기', [40, 167, 69], 16);
+      drawButton(SOLO_MENU, '메뉴로', [0, 123, 255], 16);
+    }
+
+    // =====================================================
+    // 같이하기: 대전
+    // =====================================================
+    function beginMatch() {
+      me = newBoard(1); opp = newBoard(1); acc = 0;
+      match.names = [nickLabel(net.myId, net.remote[net.myId]), labelOf(net.oppId)];
+      match.startAt = Date.now() + COUNTDOWN_MS;
+      match.lastRecv = Date.now(); match.lastSend = 0; match.lastKey = '';
+      match.result = ''; match.reason = '';
+      net.on = false;
+      gameState = 'MATCH';
+    }
+
+    // 내 상태 전송 (상태가 바뀌면 즉시, 아니면 SNAP_MS 간격)
+    function sendSnapshot(now, force) {
+      if (!me) return;
+      const key = [me.lv, me.st, me.md, me.gd, me.cu.size].join('|');
+      if (!force && key === match.lastKey && now - match.lastSend < SNAP_MS) return;
+      match.lastSend = now; match.lastKey = key;
+      netSend({
+        k: 's', lv: me.lv, lf: me.lf, st: me.st,
+        y: r1(me.y), vy: r2(me.vy), an: r1(me.ang),
+        md: me.md === 'SHIP' ? 1 : 0, gd: me.gd, cu: [...me.cu]
+      });
+    }
+
+    // 상대 상태 반영 (신뢰할 수 없는 입력이므로 모두 검증)
+    function onSnap(d) {
+      if (!opp || (gameState !== 'MATCH' && gameState !== 'MATCH_OVER')) return;
+      if (!isInt(d.lv) || d.lv < 1 || d.lv > LAST_STAGE || !isInt(d.lf) || d.lf < 0 || d.lf > STAGE_LEN + 1 ||
+          ![0, 1, 2].includes(d.st) || !isNum(d.y) || !isNum(d.vy) || !isNum(d.an) ||
+          ![0, 1].includes(d.md) || ![1, -1].includes(d.gd) ||
+          !Array.isArray(d.cu) || d.cu.length > 10 || !d.cu.every(i => isInt(i) && i >= 0 && i < 10)) return;
+      Object.assign(opp, {
+        lv: d.lv, lf: d.lf, st: d.st,
+        y: clamp(d.y, 0, H), vy: clamp(d.vy, -30, 30), ang: clamp(d.an, -1e5, 1e5),
+        md: d.md === 1 ? 'SHIP' : 'CUBE', gd: d.gd, cu: new Set(d.cu)
+      });
+      match.lastRecv = Date.now();
+      evaluate();
+    }
+
+    // 승패 판정 (양쪽이 같은 규칙으로 계산하며 진행률 기준)
+    function evaluate() {
+      if (gameState !== 'MATCH' || !me || !opp) return;
+      const mE = me.st !== 0, oE = opp.st !== 0;
+      const pm = prog(me), po = prog(opp);
+      let r = '';
+      if (mE && oE) r = pm > po ? 'win' : (pm < po ? 'lose' : 'draw');
+      else if (oE) { if (opp.st === 2) r = 'lose'; else if (pm > po) r = 'win'; }
+      else if (mE) { if (me.st === 2) r = 'win'; else if (po > pm) r = 'lose'; }
+      if (r) finishMatch(r, '');
+    }
+
+    function finishMatch(result, reason) {
+      if (gameState !== 'MATCH') return;
+      sendSnapshot(Date.now(), true);
+      match.result = result; match.reason = reason;
+      gameState = 'MATCH_OVER';
+    }
+
+    function opponentGone() {
+      if (gameState === 'MATCH') finishMatch('win', 'opp');
+    }
+
+    // 왼쪽 열: 이름 + 세로 진행 게이지 + 퍼센트 (y0: 해당 판의 세로 위치)
+    function drawSide(name, b, y0, mine) {
+      const label = mine && name !== '나' ? name + ' (나)' : name;
+      const pct = pctOf(b);
+      const barX = SIDE_W/2 - 9, barT = y0 + 58, barH = VIEW_H - 98;
+      p.push();
+      p.noStroke(); p.fill(20, 28, 45); p.rect(0, y0, SIDE_W, VIEW_H);
+      p.fill(255); p.textStyle(p.BOLD); p.textSize(12); p.textAlign(p.CENTER, p.CENTER);
+      p.text(label, SIDE_W/2, y0 + 20);
+      p.fill(253, 230, 138); p.textSize(11);
+      p.text(`STAGE ${b.lv} / 5`, SIDE_W/2, y0 + 38);
+      p.fill(50); p.rect(barX, barT, 18, barH, 9);
+      p.fill(mine ? [0, 255, 100] : [251, 146, 60]);
+      const fillH = barH * pct / 100;
+      p.rect(barX, barT + barH - fillH, 18, fillH, 9);
+      p.fill(253, 230, 138); p.textSize(16);
+      p.text(pct + '%', SIDE_W/2, y0 + VIEW_H - 18);
+      p.pop();
+    }
+
+    function drawPanelState(b, y0, mine) {
+      if (b.st === 0) {
+        if (mine && opp && opp.st === 1) {
+          p.push(); p.noStroke(); p.fill(0, 170); p.rect(20, y0 + VIEW_H - 40, W - 40, 28, 14); p.pop();
+          drawCenterText('상대 탈락! 진행률 ' + pctOf(opp) + '% 를 넘으면 승리', W/2, y0 + VIEW_H - 26, 14, [253, 230, 138]);
+        }
+        return;
+      }
+      p.push(); p.noStroke(); p.fill(0, 160); p.rect(0, y0, W, VIEW_H); p.pop();
+      if (b.st === 2) drawCenterText('🏁 CLEAR!', W/2, y0 + VIEW_H/2, 36, [255, 215, 0], p.BOLD);
+      else {
+        drawCenterText('💥 탈락', W/2, y0 + VIEW_H/2 - 20, 36, [255, 80, 80], p.BOLD);
+        drawCenterText('진행률 ' + pctOf(b) + '%', W/2, y0 + VIEW_H/2 + 20, 18);
+        if (mine && opp && opp.st === 0)
+          drawCenterText('상대가 ' + pctOf(b) + '% 를 넘으면 패배', W/2, y0 + VIEW_H/2 + 46, 13, [203, 213, 225]);
+      }
+    }
+
+    function drawMatch() {
+      drawSide(match.names[0], me, 0, true);
+      drawSide(match.names[1], opp, OPP_Y, false);
+      p.push(); p.noStroke(); p.fill(0, 166, 230); p.rect(0, VIEW_H, MATCH_W, DIV_H); p.pop();
+
+      p.push(); p.translate(SIDE_W, 0);
+      drawWorld(me, 0, false, true);
+      drawPanelState(me, 0, true);
+      drawWorld(opp, OPP_Y, false, true);
+      drawPanelState(opp, OPP_Y, false);
+      p.pop();
+
+      const CX = SIDE_W + W/2;
+      if (gameState === 'MATCH' && Date.now() < match.startAt) {
+        p.push(); p.noStroke(); p.fill(0, 120); p.rect(SIDE_W, 0, W, MATCH_H); p.pop();
+        const left = Math.ceil((match.startAt - Date.now()) / 1000);
+        drawCenterText(String(left), CX, MATCH_H/2 - 20, 130, [255, 215, 0], p.BOLD);
+        drawCenterText('스페이스 / 클릭으로 점프!', CX, MATCH_H/2 + 60, 16);
+      } else if (gameState === 'MATCH_OVER') {
+        const titles = { win: '🎉 승리!', lose: '😢 패배', draw: '🤝 무승부' };
+        p.push(); p.noStroke(); p.fill(0, 190); p.rect(SIDE_W, 0, W, MATCH_H); p.pop();
+        drawCenterText(titles[match.result] || '', CX, MATCH_H/2 - 80, 44, [255,255,255], p.BOLD);
+        drawCenterText(match.names[0] + '  ' + pctOf(me) + '%  :  ' + pctOf(opp) + '%  ' + match.names[1],
+          CX, MATCH_H/2 - 25, 20);
+        if (match.reason === 'opp') drawCenterText('상대가 나가서 승리했어요', CX, MATCH_H/2 + 10, 15, [253, 230, 138]);
+        drawButton(RESULT_BTN, '메인으로', [0, 123, 255], 16);
+      }
+    }
+
+    // =====================================================
+    // 같이하기: 접속자 목록 / 초대 / 연결 (perfectstack 과 동일 흐름)
+    // =====================================================
+    function onlineRows() {
+      const rows = [], now = Date.now();
+      for (const id in net.remote) {
+        if (id === net.myId) continue;
+        const pl = net.remote[id];
+        if (!pl || typeof pl !== 'object') continue;
+        let status = 'main';
+        if (pl.scMatch) status = 'busy';
+        else if (pl.scOn) status = 'wait';
+        rows.push({ id, name: nickLabel(id, pl), status, declLeft: Math.max(0, ((net.declined[id] || 0) - now) / 1000) });
+      }
+      const order = { wait: 0, main: 1, busy: 2 };
+      rows.sort((a, b) => (order[a.status] - order[b.status]) || a.name.localeCompare(b.name));
+      return rows;
+    }
+    const canInvite = r => r.status === 'wait' && r.declLeft <= 0 && !net.inviting && !net.incoming;
+
+    function sendInvite(id) {
+      if (net.inviting || net.incoming) return;
+      const seq = Date.now();
+      net.inviting = { to: id, seq, t0: Date.now() };
+      toMain({ type: 'SC_SET', inv: { to: id, seq }, rep: null });
+    }
+    function cancelInvite(msg) {
+      net.inviting = null;
+      toMain({ type: 'SC_SET', inv: null });
+      if (msg) showToast(msg);
+    }
+    function declineIncoming() {
+      const inc = net.incoming; if (!inc) return;
+      net.incoming = null;
+      toMain({ type: 'SC_SET', rep: { to: inc.from, seq: inc.seq, ok: false } });
+    }
+    function enterLink(role, oppId) {
+      net.role = role; net.oppId = oppId; net.link = 'connecting'; net.linkT0 = Date.now();
+      gameState = 'ONLINE_LINK';
+    }
+    function acceptIncoming() {
+      const inc = net.incoming; if (!inc) return;
+      net.incoming = null;
+      enterLink('R', inc.from);
+      toMain({ type: 'SC_EXPECT', peerId: inc.from });
+      toMain({ type: 'SC_SET', match: inc.from, inv: null, rep: { to: inc.from, seq: inc.seq, ok: true } });
+    }
+    function onAccepted(to) {
+      net.inviting = null;
+      enterLink('L', to);
+      toMain({ type: 'SC_SET', match: to, inv: null });
+      toMain({ type: 'SC_CONNECT', peerId: to });
+    }
+    function failLink(msg) {
+      toMain({ type: 'SC_CLOSE' });
+      toMain({ type: 'SC_SET', match: null, inv: null, rep: null });
+      net.role = ''; net.oppId = ''; net.link = 'none';
+      gameState = 'ONLINE_LIST';
+      if (msg) showToast(msg);
+    }
+
+    function scanNet() {
+      if (!net.on) return;
+      const now = Date.now();
+      if (net.inviting) {
+        const t = net.remote[net.inviting.to];
+        if (!t) cancelInvite('상대가 방을 나갔어요');
+        else if (t.rep && t.rep.to === net.myId && t.rep.seq === net.inviting.seq) {
+          const to = net.inviting.to;
+          if (t.rep.ok === true) onAccepted(to);
+          else { net.declined[to] = Date.now() + DECLINE_COOLDOWN; cancelInvite('초대가 거절됐어요'); }
+          return;
+        } else if (t.scMatch && t.scMatch !== net.myId) cancelInvite('상대가 다른 대전을 시작했어요');
+        else if (now - net.inviting.t0 > INVITE_TIMEOUT) cancelInvite('응답이 없어 초대가 취소됐어요');
+      }
+      if (gameState === 'ONLINE_LIST') {
+        for (const id in net.remote) {
+          if (id === net.myId) continue;
+          const pl = net.remote[id];
+          if (!pl || !pl.inv || pl.inv.to !== net.myId || !Number.isFinite(pl.inv.seq)) continue;
+          const key = id + ':' + pl.inv.seq;
+          if (net.seenInv[key]) continue;
+          net.seenInv[key] = now;
+          if (net.incoming || net.inviting) { toMain({ type: 'SC_SET', rep: { to: id, seq: pl.inv.seq, ok: false } }); continue; }
+          net.incoming = { from: id, seq: pl.inv.seq, t0: now };
+        }
+      }
+      if (net.incoming) {
+        const s = net.remote[net.incoming.from];
+        if (!s || !s.inv || s.inv.to !== net.myId || s.inv.seq !== net.incoming.seq) {
+          net.incoming = null; showToast('초대가 취소됐어요');
+        } else if (now - net.incoming.t0 > INVITE_TIMEOUT) net.incoming = null;
+      }
+    }
+
+    function enterOnlineList() {
+      if (!inFrame()) { alert('같이하기는 미니게임 월드에서 이용할 수 있어요!'); return; }
+      net.on = true; net.inviting = null; net.incoming = null; net.scroll = 0; net.toast = null;
+      gameState = 'ONLINE_LIST';
+      toMain({ type: 'SC_SET', on: true, match: null, inv: null, rep: null });
+    }
+    function leaveOnlineList() {
+      net.on = false; net.inviting = null; net.incoming = null;
+      toMain({ type: 'SC_SET', on: false, match: null, inv: null, rep: null });
+      gameState = 'START';
+    }
+    function leaveMatch() {
+      toMain({ type: 'SC_CLOSE' });
+      toMain({ type: 'SC_SET', on: false, match: null, inv: null, rep: null });
+      net.on = false; net.inviting = null; net.incoming = null;
+      net.role = ''; net.oppId = ''; net.link = 'none';
+      me = null; opp = null;
+      gameState = 'START';
+    }
+
+    function onLinkEvent(state) {
+      if (state === 'open') {
+        if (gameState !== 'ONLINE_LINK') return;
+        net.link = 'open'; net.linkT0 = Date.now();
+        if (net.role === 'L') { netSend({ k: 'start' }); beginMatch(); }
+      } else {
+        if (gameState === 'ONLINE_LINK') failLink('연결이 끊어졌어요');
+        else if (gameState === 'MATCH') opponentGone();
+      }
+    }
+    function onNetData(d) {
+      if (!d || typeof d.k !== 'string') return;
+      if (d.k === 's') onSnap(d);
+      else if (d.k === 'start' && net.role === 'R' && gameState === 'ONLINE_LINK') beginMatch();
+    }
+    function linkTick() {
+      if (net.toast && Date.now() > net.toast.until) net.toast = null;
+      if (net.on) scanNet();
+      if (gameState === 'ONLINE_LINK') {
+        const el = Date.now() - net.linkT0;
+        if (net.link !== 'open' && el > LINK_TIMEOUT) failLink('연결에 실패했어요. 다시 시도해 주세요');
+        else if (net.link === 'open' && net.role === 'R' && el > START_TIMEOUT) failLink('상대 응답이 없어요');
+      }
+    }
+
+    // =====================================================
+    // 화면: 시작 / 목록
+    // =====================================================
+    function drawStart() {
+      drawCenterText('GEOMETRY DASH: 5 STAGES', W/2, 110, 32, [0, 255, 150], p.BOLD);
+      drawCenterText('HOLD SPACEBAR OR CLICK TO JUMP / FLY UP', W/2, 150, 15, [255, 255, 255, 200]);
+      drawButton(BTN_SOLO, '혼자하기', [40, 167, 69], 20);
+      drawButton(BTN_ONLINE, '같이하기', [14, 116, 144], 20);
+      drawCenterText('같이하기는 같은 방의 플레이어와 1:1 대결 (진행률이 높은 쪽 승리)', W/2, 360, 12, [220, 220, 220]);
+    }
+
+    function drawOverlayBox(y, h, col) {
+      dim(180);
+      p.push(); p.fill(30, 41, 59); p.stroke(col[0], col[1], col[2]); p.strokeWeight(3);
+      p.rect(200, y, 400, h, 14); p.pop();
+    }
+
+    function drawOnlineRow(r, i) {
+      const rc = rowRect(i), b = invRect(i);
+      p.push();
+      p.noStroke(); p.fill(15, 23, 42, r.declLeft > 0 ? 100 : 230); p.rect(rc.x, rc.y, rc.w, rc.h, 10);
+      p.fill(255); p.textStyle(p.NORMAL); p.textAlign(p.LEFT, p.CENTER); p.textSize(15);
+      p.text(r.name, rc.x + 14, rc.y + 16);
+      let st, col;
+      if (r.declLeft > 0) { st = '🔴 거절됨 · ' + Math.ceil(r.declLeft) + '초 뒤 다시 가능'; col = [248, 113, 113]; }
+      else if (r.status === 'wait') { st = '🟢 대기 중'; col = [74, 222, 128]; }
+      else if (r.status === 'busy') { st = '🟠 대전 중'; col = [251, 146, 60]; }
+      else { st = '⚪ 접속 중 (초대 불가)'; col = [148, 163, 184]; }
+      p.fill(col[0], col[1], col[2]); p.textSize(11); p.text(st, rc.x + 14, rc.y + 36);
+      p.pop();
+      if (r.status !== 'busy') drawButton(b, '초대', canInvite(r) ? [34, 211, 238] : [71, 85, 105], 14);
+    }
+
+    function drawOnline() {
+      drawCenterText('같이하기 🌐', W/2, 40, 24, [255,255,255], p.BOLD);
+      drawCenterText('같은 방의 플레이어를 초대해 1대1로 대결하세요', W/2, 72, 12, [230,230,230]);
+      p.push(); p.noStroke(); p.fill(0, 90); p.rect(140, 92, 520, 200, 12); p.pop();
+
+      const rows = onlineRows();
+      const maxScroll = Math.max(0, rows.length - ROWS_VIS);
+      net.scroll = clamp(net.scroll, 0, maxScroll);
+      if (rows.length === 0) {
+        drawCenterText(Object.keys(net.remote).length === 0 ? '접속자 목록을 불러오는 중...' : '방에 다른 플레이어가 없어요',
+          W/2, 180, 14, [230,230,230]);
+      }
+      rows.slice(net.scroll, net.scroll + ROWS_VIS).forEach((r, i) => drawOnlineRow(r, i));
+      if (rows.length > ROWS_VIS) {
+        drawButton(SCROLL_UP, '▲', [51, 65, 85], 14);
+        drawButton(SCROLL_DN, '▼', [51, 65, 85], 14);
+      }
+      drawButton(BACK_RECT, 'BACK', [255, 71, 87], 16);
+
+      if (gameState === 'ONLINE_LINK') {
+        drawOverlayBox(170, 200, [34, 211, 238]);
+        drawCenterText('🌐 상대와 연결 중...', W/2, 190, 20, [255,255,255], p.BOLD);
+        drawCenterText(net.link === 'open' ? '대전을 준비하고 있어요' : '직접 연결을 만드는 중이에요', W/2, 222, 13, [203,213,225]);
+        drawButton(CANCEL_RECT, '취소', [71, 85, 105], 16);
+      } else if (net.incoming) {
+        const left = Math.max(0, Math.ceil((INVITE_TIMEOUT - (Date.now() - net.incoming.t0)) / 1000));
+        drawOverlayBox(150, 240, [250, 204, 21]);
+        drawCenterText('📩 대전 초대가 왔어요!', W/2, 170, 18, [250,204,21], p.BOLD);
+        drawCenterText(labelOf(net.incoming.from) + '님이 1:1 대결을 신청했어요', W/2, 200, 15);
+        drawCenterText(left + '초 안에 응답해 주세요', W/2, 224, 12, [148,163,184]);
+        drawButton(ACCEPT_RECT, '수락', [34, 197, 94], 16);
+        drawButton(DECLINE_RECT, '거절', [239, 68, 68], 16);
+      } else if (net.inviting) {
+        const left = Math.max(0, Math.ceil((INVITE_TIMEOUT - (Date.now() - net.inviting.t0)) / 1000));
+        drawOverlayBox(170, 200, [34, 211, 238]);
+        drawCenterText(labelOf(net.inviting.to) + '님에게 초대를 보냈어요', W/2, 190, 18);
+        drawCenterText('응답을 기다리는 중... ' + left + '초', W/2, 222, 14, [203,213,225]);
+        drawButton(CANCEL_RECT, '초대 취소', [71, 85, 105], 16);
+      }
+    }
+
+    function drawToast() {
+      if (!net.toast) return;
+      p.push(); p.noStroke(); p.fill(0, 220); p.rect(W/2 - 165, H - 44, 330, 30, 15); p.pop();
+      drawCenterText(net.toast.msg, W/2, H - 29, 13, [253, 230, 138]);
+    }
+
+    // =====================================================
+    // 레이아웃: 화면에 맞춰 자동 배율
+    // =====================================================
+    function syncLayout() {
+      const isMatch = gameState === 'MATCH' || gameState === 'MATCH_OVER';
+      const lw = isMatch ? MATCH_W : W, lh = isMatch ? MATCH_H : H;
+      const hidden = inFrame() ? TOP_HIDDEN : 0;
+      const aw = Math.max(240, window.innerWidth - 4);
+      const ah = Math.max(240, window.innerHeight - hidden - 4);
+      let k = Math.min(aw / lw, ah / lh, isMatch ? MAX_K : 1);
+      k = Math.max(0.3, Math.floor(k * 100) / 100);
+      if (lw !== L.lw || lh !== L.lh || k !== L.k) {
+        L = { lw, lh, k, pw: Math.round(lw * k), ph: Math.round(lh * k) };
+        p.resizeCanvas(L.pw, L.ph, true);
+      }
+    }
+
+    // =====================================================
+    // 입력
+    // =====================================================
+    const isPlaying = () => (gameState === 'SOLO' && solo.st === 0) || gameState === 'MATCH';
+
+    function press() {
+      inp.hold = true;
+      if (gameState === 'MATCH' && Date.now() >= match.startAt) sendSnapshot(Date.now(), true);
+    }
+    function release() { inp.hold = false; }
+
+    function handleClick(px, py) {
+      const mx = px / L.k, my = py / L.k;
+      switch (gameState) {
+        case 'START':
+          if (inRect(mx, my, BTN_SOLO)) startSolo();
+          else if (inRect(mx, my, BTN_ONLINE)) enterOnlineList();
+          break;
+        case 'SOLO':
+          if (solo.st && inRect(mx, my, SOLO_RETRY)) soloRetry();
+          else if (solo.st && inRect(mx, my, SOLO_MENU)) gameState = 'START';
+          break;
+        case 'ONLINE_LIST':
+        case 'ONLINE_LINK':
+          handleOnlineClick(mx, my);
+          break;
+        case 'MATCH_OVER':
+          if (inRect(mx, my, RESULT_BTN)) leaveMatch();
+          break;
+      }
+    }
+
+    function handleOnlineClick(mx, my) {
+      if (gameState === 'ONLINE_LINK') { if (inRect(mx, my, CANCEL_RECT)) failLink(null); return; }
+      if (net.incoming) {
+        if (inRect(mx, my, ACCEPT_RECT)) acceptIncoming();
+        else if (inRect(mx, my, DECLINE_RECT)) declineIncoming();
+        return;
+      }
+      if (net.inviting) { if (inRect(mx, my, CANCEL_RECT)) cancelInvite(null); return; }
+      if (inRect(mx, my, BACK_RECT)) { leaveOnlineList(); return; }
+      const rows = onlineRows();
+      if (rows.length > ROWS_VIS) {
+        if (inRect(mx, my, SCROLL_UP)) { net.scroll = Math.max(0, net.scroll - 1); return; }
+        if (inRect(mx, my, SCROLL_DN)) { net.scroll = Math.min(rows.length - ROWS_VIS, net.scroll + 1); return; }
+      }
+      rows.slice(net.scroll, net.scroll + ROWS_VIS).forEach((r, i) => {
+        if (inRect(mx, my, invRect(i)) && canInvite(r)) sendInvite(r.id);
+      });
+    }
+
+    function pointerDown(px, py) {
+      if (isPlaying()) press();
+      else handleClick(px, py);
+    }
+
+    // 메인 월드 메시지 수신
+    window.addEventListener('message', (e) => {
+      if (e.source !== window.parent) return;
+      const d = e.data;
+      if (!d || typeof d.type !== 'string') return;
+      if (d.type === 'SYNC_PLAYERS') {
+        if (d.players && typeof d.players === 'object') net.remote = d.players;
+        if (typeof d.myId === 'string') net.myId = d.myId;
+      } else if (d.type === 'SC_LINK') onLinkEvent(d.state);
+      else if (d.type === 'SC_DATA') onNetData(d.data);
+    });
+    window.addEventListener('blur', release);
+
+    // =====================================================
+    // p5 라이프사이클
+    // =====================================================
+    p.setup = () => {
+      document.body.style.paddingTop = (inFrame() ? TOP_HIDDEN : 0) + 'px';
+      const canvas = p.createCanvas(W, H);
+      canvas.parent('game-container');
+    };
+
+    p.draw = () => {
+      syncLayout();
+      linkTick();
+
+      if (gameState === 'SOLO' || gameState === 'MATCH') {
+        acc = Math.min(acc + p.deltaTime, 100);
+        if (gameState === 'SOLO') {
+          while (acc >= STEP_MS) { acc -= STEP_MS; step(solo, inp.hold, false); }
+        } else {
+          const live = Date.now() >= match.startAt;
+          while (acc >= STEP_MS) {
+            acc -= STEP_MS;
+            if (live) { step(me, inp.hold, false); step(opp, false, true); }
+          }
+          const now = Date.now();
+          sendSnapshot(now, false);
+          evaluate();
+          if (gameState === 'MATCH' && now - match.lastRecv > OPP_TIMEOUT_MS) opponentGone();
+        }
+      }
+
+      p.background(BG[0][0], BG[0][1], BG[0][2]);
+      p.push();
+      p.scale(L.k);
+      p.textStyle(p.NORMAL);
+      if (gameState === 'SOLO') drawSolo();
+      else if (gameState === 'START') drawStart();
+      else if (gameState === 'ONLINE_LIST' || gameState === 'ONLINE_LINK') drawOnline();
+      else if ((gameState === 'MATCH' || gameState === 'MATCH_OVER') && me && opp) drawMatch();
+      if (gameState !== 'MATCH' && gameState !== 'MATCH_OVER') drawToast();
+      p.pop();
+    };
+
+    p.mousePressed = () => { pointerDown(p.mouseX, p.mouseY); return false; };
+    p.mouseReleased = () => { release(); return false; };
+    p.touchStarted = () => { pointerDown(p.mouseX, p.mouseY); return false; };
+    p.touchEnded = () => { release(); return false; };
+
+    p.keyPressed = () => {
+      if (p.key !== ' ') return;
+      if (gameState === 'SOLO' && solo.st) soloRetry();
+      else if (isPlaying()) press();
+      return false;
+    };
+    p.keyReleased = () => { if (p.key === ' ') release(); };
+  }
+
+  function start(containerId) {
+    destroy();
+    instance = new p5(sketch, containerId);
+  }
+  function destroy() { if (instance) { instance.remove(); instance = null; } }
+  return { start, destroy };
+})();
+
+GeoDashGame.start('game-container');
+</script>
+</body>
+</html>

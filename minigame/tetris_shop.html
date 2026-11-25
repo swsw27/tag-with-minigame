@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>테트리스 & 스킨 상점</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.6.0/p5.min.js"></script>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: #111;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      overflow: hidden;
+      font-family: 'Helvetica', sans-serif;
+    }
+    canvas {
+      display: block;
+      box-shadow: 0 0 20px rgba(0, 0, 0, 0.8);
+    }
+  </style>
+</head>
+<body>
+
+<script>
+// 게임 설정 변수
+const BLOCK_SIZE = 30;
+const GRID_WIDTH = 10;
+const GRID_HEIGHT = 20;
+const SIDEBAR_WIDTH = 250;
+
+let grid = [];
+let score = 0;
+let coins = 0;
+let isPaused = false;
+
+const SHAPES = [
+    [[1, 1, 1, 1]], [[1, 1, 1], [0, 1, 0]], [[1, 1, 1], [1, 0, 0]], 
+    [[1, 1, 1], [0, 0, 1]], [[1, 1], [1, 1]], [[1, 1, 0], [0, 1, 1]], [[0, 1, 1], [1, 1, 0]]
+];
+
+const BASE_COLORS = [
+    [0, 255, 255], [128, 0, 128], [255, 165, 0],
+    [0, 0, 255], [255, 255, 0], [255, 0, 0], [0, 255, 0]
+];
+
+// 그라데이션 스킨 데이터 (이름, 색상1, 색상2, 가격)
+const GRADIENT_SKINS = [
+    { name: "노을", c1: [255, 94, 77], c2: [255, 187, 51], price: 50 },
+    { name: "심해", c1: [0, 4, 40], c2: [0, 78, 146], price: 80 },
+    { name: "숲", c1: [91, 134, 54], c2: [161, 196, 61], price: 80 },
+    { name: "사이버", c1: [138, 35, 135], c2: [233, 64, 87], price: 120 },
+    { name: "민트초코", c1: [29, 38, 113], c2: [190, 255, 255], price: 120 },
+    { name: "라임", c1: [0, 201, 167], c2: [169, 241, 0], price: 150 },
+    { name: "갤럭시", c1: [102, 45, 140], c2: [48, 232, 191], price: 200 },
+    { name: "불꽃", c1: [237, 33, 58], c2: [147, 41, 30], price: 200 }
+];
+
+let unlockedGradients = new Array(GRADIENT_SKINS.length).fill(false);
+let activeSkin = "default"; // "default", "custom", "grad0", "grad1" ...
+let customRGB = [255, 128, 0];
+let draggingSlider = -1;
+
+let currentShape, currentShapeIdx, currentX, currentY;
+let lastFallTime = 0;
+const fallSpeed = 500;
+
+function setup() {
+    createCanvas(GRID_WIDTH * BLOCK_SIZE, GRID_HEIGHT * BLOCK_SIZE);
+    initGame();
+}
+
+function initGame() {
+    score = 0;
+    coins = 0;
+    for (let i = 0; i < GRID_HEIGHT; i++) {
+        grid[i] = new Array(GRID_WIDTH).fill(0);
+    }
+    resetPiece();
+}
+
+function draw() {
+    background(0);
+    if (!isPaused) {
+        let currentTime = millis();
+        if (currentTime - lastFallTime > fallSpeed) {
+            if (!checkCollision(currentShape, currentX, currentY + 1)) {
+                currentY++;
+            } else {
+                lockPiece();
+            }
+            lastFallTime = currentTime;
+        }
+    }
+    
+    // 격자판 그리기
+    for (let y = 0; y < GRID_HEIGHT; y++) {
+        for (let x = 0; x < GRID_WIDTH; x++) {
+            let cell = grid[y][x];
+            let drawX = x * BLOCK_SIZE;
+            let drawY = y * BLOCK_SIZE;
+            if (cell) {
+                // 저장된 고정 블록 데이터가 객체나 고유 구별 문자열 형태일 수 있으므로 유연하게 처리
+                if (typeof cell === "number") {
+                    drawSkinBlock(drawX, drawY, "default", cell);
+                } else {
+                    drawSkinBlock(drawX, drawY, cell, 0);
+                }
+            } else {
+                fill(30);
+                stroke(50);
+                rect(drawX, drawY, BLOCK_SIZE, BLOCK_SIZE);
+            }
+        }
+    }
+    
+    // 현재 블록 그리기
+    if (currentShape) {
+        for (let cy = 0; cy < currentShape.length; cy++) {
+            for (let cx = 0; cx < currentShape[cy].length; cx++) {
+                if (currentShape[cy][cx]) {
+                    drawSkinBlock((currentX + cx) * BLOCK_SIZE, (currentY + cy) * BLOCK_SIZE, activeSkin, currentShapeIdx);
+                }
+            }
+        }
+    }
+    
+    if (!isPaused) drawMiniHUD();
+    else drawSidebar();
+}
+
+// 스킨 타입에 따라 블록을 그리는 핵심 함수
+function drawSkinBlock(x, y, skinType, shapeIdx = 0) {
+    if (skinType === "default") {
+        fill(BASE_COLORS[shapeIdx]);
+        stroke(0);
+        rect(x, y, BLOCK_SIZE, BLOCK_SIZE);
+    } else if (skinType === "custom") {
+        fill(customRGB);
+        stroke(0);
+        rect(x, y, BLOCK_SIZE, BLOCK_SIZE);
+    } else if (skinType.startsWith("grad")) {
+        let idx = parseInt(skinType.replace("grad", ""));
+        let s = GRADIENT_SKINS[idx];
+        drawGradientRect(x, y, BLOCK_SIZE, BLOCK_SIZE, color(s.c1), color(s.c2));
+    } else {
+        // 백업 예외 처리
+        fill(150);
+        stroke(0);
+        rect(x, y, BLOCK_SIZE, BLOCK_SIZE);
+    }
+}
+
+// 그라데이션 사각형 그리기 보조 함수
+function drawGradientRect(x, y, w, h, c1, c2) {
+    noFill();
+    for (let i = y; i <= y + h; i++) {
+        let inter = map(i, y, y + h, 0, 1);
+        let c = lerpColor(c1, c2, inter);
+        stroke(c);
+        line(x, i, x + w, i);
+    }
+    stroke(0, 50);
+    noFill();
+    rect(x, y, w, h);
+}
+
+function resetPiece() {
+    currentShapeIdx = floor(random(0, 7));
+    currentShape = SHAPES[currentShapeIdx];
+    currentX = floor(GRID_WIDTH / 2) - floor(currentShape[0].length / 2);
+    currentY = 0;
+    if (checkCollision(currentShape, currentX, currentY)) initGame();
+}
+
+function checkCollision(shape, offsetX, offsetY) {
+    for (let cy = 0; cy < shape.length; cy++) {
+        for (let cx = 0; cx < shape[cy].length; cx++) {
+            if (shape[cy][cx]) {
+                let nextX = offsetX + cx;
+                let nextY = offsetY + cy;
+                if (nextX < 0 || nextX >= GRID_WIDTH || nextY >= GRID_HEIGHT) return true;
+                if (nextY >= 0 && grid[nextY][nextX]) return true;
+            }
+        }
+    }
+    return false;
+}
+
+function lockPiece() {
+    for (let cy = 0; cy < currentShape.length; cy++) {
+        for (let cx = 0; cx < currentShape[cy].length; cx++) {
+            if (currentShape[cy][cx]) {
+                if (currentY + cy >= 0) {
+                    grid[currentY + cy][currentX + cx] = activeSkin;
+                }
+            }
+        }
+    }
+    clearLines();
+    resetPiece();
+}
+
+function clearLines() {
+    let lines = 0;
+    for (let y = GRID_HEIGHT - 1; y >= 0; y--) {
+        if (grid[y].every(cell => cell !== 0)) {
+            grid.splice(y, 1);
+            grid.unshift(new Array(GRID_WIDTH).fill(0));
+            lines++;
+            y++; 
+        }
+    }
+    if (lines > 0) { 
+        score += lines * 100;
+        coins += lines * 10; 
+    }
+}
+
+function rotatePiece() {
+    let rotated = [];
+    for (let i = 0; i < currentShape[0].length; i++) {
+        rotated[i] = [];
+        for (let j = currentShape.length - 1; j >= 0; j--) rotated[i].push(currentShape[j][i]);
+    }
+    if (!checkCollision(rotated, currentX, currentY)) currentShape = rotated;
+}
+
+function keyPressed() {
+    if (key === 'q' || key === 'Q') {
+        isPaused = !isPaused;
+        resizeCanvas(isPaused ? GRID_WIDTH * BLOCK_SIZE + SIDEBAR_WIDTH : GRID_WIDTH * BLOCK_SIZE, GRID_HEIGHT * BLOCK_SIZE);
+        return;
+    }
+    if (isPaused) return;
+    if (key === 'a' || key === 'A') if (!checkCollision(currentShape, currentX - 1, currentY)) currentX--;
+    if (key === 'd' || key === 'D') if (!checkCollision(currentShape, currentX + 1, currentY)) currentX++;
+    if (key === 's' || key === 'S') if (!checkCollision(currentShape, currentX, currentY + 1)) currentY++;
+    if (key === 'w' || key === 'W') rotatePiece();
+    if (key === ' ') { 
+        while (!checkCollision(currentShape, currentX, currentY + 1)) currentY++;
+        lockPiece(); 
+    }
+}
+
+function mousePressed() {
+    if (!isPaused) return;
+    let sbX = GRID_WIDTH * BLOCK_SIZE + 15;
+    
+    // 1. 기본 스킨 버튼 클릭
+    if (mouseX >= sbX && mouseX <= sbX + 220 && mouseY >= 100 && mouseY <= 130) {
+        activeSkin = "default";
+    }
+
+    // 2. 그라데이션 스킨 버튼 클릭 감지
+    for (let i = 0; i < GRADIENT_SKINS.length; i++) {
+        let col = i % 2;
+        let row = floor(i / 2);
+        let bx = sbX + col * 115;
+        let by = 170 + row * 50;
+        if (mouseX >= bx && mouseX <= bx + 105 && mouseY >= by && mouseY <= by + 40) {
+            if (unlockedGradients[i]) {
+                activeSkin = `grad${i}`;
+            } else if (coins >= GRADIENT_SKINS[i].price) {
+                coins -= GRADIENT_SKINS[i].price;
+                unlockedGradients[i] = true;
+                activeSkin = `grad${i}`;
+            }
+        }
+    }
+
+    // 3. RGB 커스텀 버튼 클릭
+    if (mouseX >= sbX && mouseX <= sbX + 220 && mouseY >= 380 && mouseY <= 410) {
+        activeSkin = "custom";
+    }
+
+    // 4. RGB 슬라이더 조절
+    for (let i = 0; i < 3; i++) {
+        let by = 430 + i * 25;
+        if (mouseX >= sbX && mouseX <= sbX + 45 && mouseY >= by && mouseY <= by + 15) {
+            let val = prompt("0~255 입력:", customRGB[i]);
+            if (val !== null) customRGB[i] = constrain(parseInt(val) || 0, 0, 255);
+        }
+        if (mouseX >= sbX + 55 && mouseX <= sbX + 205 && mouseY >= by && mouseY <= by + 15) {
+            draggingSlider = i;
+            updateSlider();
+        }
+    }
+}
+
+function mouseDragged() { 
+    if (isPaused && draggingSlider !== -1) updateSlider();
+}
+
+function mouseReleased() { 
+    draggingSlider = -1; 
+}
+
+function updateSlider() {
+    let startX = GRID_WIDTH * BLOCK_SIZE + 15 + 55;
+    customRGB[draggingSlider] = floor(constrain(((mouseX - startX) / 150) * 255, 0, 255));
+}
+
+function drawMiniHUD() {
+    fill(0, 150);
+    rect(5, 5, 100, 50, 5);
+    textSize(12); fill(255); noStroke();
+    text(`코인: ${coins}🪙`, 10, 25);
+    text(`[Q] 상점`, 10, 42);
+}
+
+function drawSidebar() {
+    let sbX = GRID_WIDTH * BLOCK_SIZE + 15;
+    fill(25); noStroke();
+    rect(GRID_WIDTH * BLOCK_SIZE, 0, SIDEBAR_WIDTH, height);
+    
+    fill(255, 215, 0); textSize(18); text(`잔액: ${coins} 🪙`, sbX, 35);
+    fill(200); textSize(12);
+    text("Q를 눌러 게임으로 복귀", sbX, 55);
+
+    // 기본 스킨 버튼
+    fill(activeSkin === "default" ? 80 : 40);
+    stroke(100);
+    rect(sbX, 100, 220, 30, 5);
+    fill(255); noStroke(); text("클래식 스킨 (장착)", sbX + 10, 120);
+    
+    // 그라데이션 스킨 리스트 (2열 배치)
+    textSize(14); fill(255); text("--- 그라데이션 상점 ---", sbX, 155);
+    for (let i = 0; i < GRADIENT_SKINS.length; i++) {
+        let col = i % 2;
+        let row = floor(i / 2);
+        let bx = sbX + col * 115;
+        let by = 170 + row * 50;
+        
+        fill(activeSkin === `grad${i}` ? 80 : 40); stroke(80);
+        rect(bx, by, 105, 40, 5);
+        
+        // 미리보기 선
+        drawGradientRect(bx + 5, by + 5, 15, 30, color(GRADIENT_SKINS[i].c1), color(GRADIENT_SKINS[i].c2));
+        fill(255); noStroke(); textSize(11);
+        text(GRADIENT_SKINS[i].name, bx + 25, by + 18);
+        fill(255, 200, 0);
+        text(unlockedGradients[i] ? "보유중" : GRADIENT_SKINS[i].price + "C", bx + 25, by + 32);
+    }
+
+    // RGB 커스텀
+    stroke(60); line(sbX, 370, width - 15, 370);
+    fill(activeSkin === "custom" ? 80 : 40); stroke(100);
+    rect(sbX, 380, 220, 30, 5);
+    fill(255); noStroke();
+    text("무료 RGB 커스텀 적용", sbX + 10, 400);
+
+    let labels = ["R", "G", "B"];
+    let bCols = [[255, 50, 50], [50, 255, 50], [50, 50, 255]];
+    for (let i = 0; i < 3; i++) {
+        let by = 430 + i * 25;
+        fill(200); text(`${labels[i]}: ${customRGB[i]}`, sbX, by + 12);
+        fill(60); rect(sbX + 55, by, 150, 12, 2);
+        fill(bCols[i]);
+        rect(sbX + 55, by, (customRGB[i]/255)*150, 12, 2);
+    }
+}
+</script>
+
+</body>
+</html>

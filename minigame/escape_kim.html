@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>김씨 탈출 게임</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.6.0/p5.min.js"></script>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: #000;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      overflow: hidden;
+    }
+    canvas {
+      display: block;
+      box-shadow: 0 0 20px rgba(255, 255, 255, 0.1);
+    }
+  </style>
+</head>
+<body>
+
+<script>
+let gameState = 'START';
+let stage = 1; 
+let player, robber, clone, cultist;
+let lighter, excavator;
+let frameCounter = 0;
+let objects = []; 
+let hasLighter = false;
+let hasExcavator = false;
+let burntCount = 0;
+
+let cultistDestroyed = false; 
+
+let mapWidth = 1600;  
+let mapHeight = 1200; 
+
+let currentCamX = 0;
+let currentCamY = 0;
+
+let hasBat = false;      
+let keyNPC;              
+let keyItem;             
+let isKeyNPCAfraid = false; 
+let hasKey = false;       
+let vents = []; 
+
+let blindNPC;           
+let beamTimer = 0;      
+let isBeamActive = false; 
+let beamWidth = 50 * 1.25; 
+
+let cobwebs = []; 
+
+function setup() {
+  createCanvas(800, 600);
+  initGameFlow();
+}
+
+function initGameFlow() {
+  objects = [];
+  vents = []; 
+  cobwebs = []; 
+  burntCount = 0;
+  hasLighter = false;
+  hasExcavator = false;
+  hasBat = false; 
+  hasKey = false;
+  isKeyNPCAfraid = false;
+  cultistDestroyed = false; 
+  
+  beamTimer = 0;
+  isBeamActive = false;
+
+  if (stage === 1) {
+    mapWidth = 1200; mapHeight = 900;
+    createLevel(5, 4, "FOREST"); 
+  } else {
+    mapWidth = 1600; mapHeight = 600; 
+    createLevel(5, 1, "SUBWAY"); 
+    
+    let batIndex = floor(random(5));
+    for (let i = 0; i < objects.length; i++) {
+      if (i === batIndex) objects[i].hasBatInside = true;
+    }
+
+    keyNPC = createVector(1500, 300);
+    keyItem = createVector(-100, -100); 
+
+    createVents(3);
+    createCobwebs(4);
+    
+    blindNPC = createVector(800, 100);
+  }
+
+  if (stage === 1) {
+    let shuffled = [...objects];
+    shuffled.sort(() => Math.random() - 0.5);
+    robber = createVector(shuffled[0].x, shuffled[0].y + 50);
+    clone = createVector(shuffled[1].x, shuffled[1].y + 50);
+  } else {
+    robber = createVector(-500, -500);
+    clone = createVector(-500, -500);
+  }
+
+  lighter = createVector(random(50, mapWidth - 50), random(50, mapHeight - 50));
+  excavator = createVector(-100, -100); 
+  player = createVector(mapWidth / 2, mapHeight - 100);
+  cultist = createVector(mapWidth / 2, 150); 
+  
+  currentCamX = -player.x + width / 2;
+  currentCamY = -player.y + height / 2;
+}
+
+function createLevel(cols, rows, type) {
+  let spacingX = mapWidth / (cols + 1);
+  let spacingY = mapHeight / (rows + 1);
+  for (let i = 0; i < cols; i++) {
+    for (let j = 0; j < rows; j++) {
+      objects.push({ 
+        x: (i + 1) * spacingX + random(-10, 10), 
+        y: (j + 1) * spacingY + random(-10, 10), 
+        isBurnt: false, 
+        type: type,
+        hasBatInside: false 
+      });
+    }
+  }
+}
+
+function createVents(count) {
+  let attempts = 0;
+  while (vents.length < count && attempts < 1000) {
+    attempts++;
+    let rx = random(100, mapWidth - 100);
+    let ry = random(200, mapHeight - 100); 
+    let candidate = createVector(rx, ry);
+    
+    let isValid = true;
+    if (dist(candidate.x, candidate.y, mapWidth / 2, 150) < 150) isValid = false;
+    if (dist(candidate.x, candidate.y, 1500, 300) < 150) isValid = false;
+    if (dist(candidate.x, candidate.y, 800, 100) < 150) isValid = false; 
+    
+    for (let o of objects) {
+      if (dist(candidate.x, candidate.y, o.x, o.y) < 120) isValid = false;
+    }
+    for (let v of vents) {
+      if (dist(candidate.x, candidate.y, v.x, v.y) < 150) isValid = false;
+    }
+
+    if (isValid) vents.push(candidate);
+  }
+}
+
+function createCobwebs(count) {
+  let attempts = 0;
+  while (cobwebs.length < count && attempts < 1000) {
+    attempts++;
+    let rx = random(100, mapWidth - 100);
+    let ry = random(180, mapHeight - 100);
+    let candidate = createVector(rx, ry);
+    
+    let isValid = true;
+    if (dist(candidate.x, candidate.y, mapWidth / 2, 150) < 150) isValid = false; 
+    if (dist(candidate.x, candidate.y, 1500, 300) < 150) isValid = false; 
+    if (dist(candidate.x, candidate.y, 800, 100) < 150) isValid = false;  
+    
+    for (let o of objects) {
+      if (dist(candidate.x, candidate.y, o.x, o.y) < 100) isValid = false; 
+    }
+    for (let v of vents) {
+      if (dist(candidate.x, candidate.y, v.x, v.y) < 100) isValid = false; 
+    }
+    for (let c of cobwebs) {
+      if (dist(candidate.x, candidate.y, c.x, c.y) < 150) isValid = false; 
+    }
+
+    if (isValid) cobwebs.push(candidate);
+  }
+}
+
+function draw() {
+  background(0); 
+  
+  if (gameState === 'PLAY') {
+    frameCounter++;
+    
+    if (stage === 2) {
+      beamTimer++;
+      if (!isBeamActive && beamTimer >= 300) { 
+        isBeamActive = true;
+        beamTimer = 0;
+      } else if (isBeamActive && beamTimer >= 180) { 
+        isBeamActive = false;
+        beamTimer = 0;
+      }
+    }
+  }
+
+  push();
+  let targetCamX = -player.x + width / 2;
+  let targetCamY = -player.y + height / 2;
+  
+  currentCamX = lerp(currentCamX, targetCamX, 0.1);
+  currentCamY = lerp(currentCamY, targetCamY, 0.1);
+  
+  currentCamX = constrain(currentCamX, -(mapWidth - width), 0);
+  currentCamY = constrain(currentCamY, -(mapHeight - height), 0);
+  
+  translate(currentCamX, currentCamY);
+
+  if (stage === 1) fill(34, 139, 34); else fill(70);
+  rect(0, 0, mapWidth, mapHeight);
+
+  drawGameWorld();
+  
+  if (gameState === 'PLAY') handlePlay();
+  
+  pop();
+
+  drawUI();
+}
+
+function drawUI() {
+  if (gameState === 'START') showOverlay("김씨 탈출 게임!!!", "마우스 클릭으로 시작\n[W, A, S, D]: 이동  |  [E]: 상호작용\n화면이 주인공을 따라갑니다!");
+  else if (gameState === 'WIN') showWinScreen();
+  else if (gameState.includes('DIE')) showGameOver();
+
+  fill(255); textAlign(LEFT); textSize(20);
+  text("STAGE: " + stage + (stage === 2 ? " (지하철역)" : " (숲)"), 20, 30);
+  
+  if (stage === 1) {
+    text("남은 나무: " + (objects.length - burntCount), 20, 60);
+  } else {
+    let targetText = "목표: 5개 상자 중 방망이 찾기!";
+    if (hasKey) targetText = "목표: 열쇠로 지하철 문 열고 탈출하기!";
+    else if (isKeyNPCAfraid) targetText = "목표: 김열쇠가 떨군 열쇠 줍기!";
+    else if (hasBat) targetText = "목표: 맵 맨 오른쪽의 김열쇠 협박하기!";
+    
+    text(targetText, 20, 60);
+    
+    let timeLeft = isBeamActive ? ceil((180 - beamTimer)/60) : ceil((300 - beamTimer)/60);
+    if (isBeamActive) {
+      fill(255, 50, 50);
+      text("⚠️ 경고: 김눈뽕 레이저 발사 중!!! (" + timeLeft + "초 남음)", 20, 90);
+    } else {
+      fill(255, 200, 0);
+      text("⏳ 안전: 김눈뽕 충전 중... (" + timeLeft + "초 뒤 발사)", 20, 90);
+    }
+  }
+}
+
+function drawGameWorld() {
+  if (stage === 2) {
+    stroke(40); strokeWeight(40); line(0, 80, mapWidth, 80); noStroke();
+  }
+
+  if (stage === 2) {
+    for (let c of cobwebs) {
+      push();
+      translate(c.x, c.y);
+      stroke(220, 220, 255, 45); 
+      strokeWeight(1.5);
+      noFill();
+      for (let i = 0; i < 8; i++) {
+        let angle = TWO_PI / 8 * i;
+        line(0, 0, cos(angle) * 30, sin(angle) * 30);
+      }
+      rect(-15, -15, 30, 30);
+      rect(-22, -22, 44, 44);
+      pop();
+    }
+  }
+
+  for (let o of objects) {
+    if (o.isBurnt) continue;
+    if (o.type === "FOREST") {
+      fill(101, 67, 33); rect(o.x, o.y + 10, 14, 25);
+      fill(20, 100, 20); ellipse(o.x, o.y - 10, 50, 50);
+    } else {
+      fill(200, 150, 100); rect(o.x - 20, o.y - 20, 40, 40);
+      fill(150, 100, 50); rect(o.x - 20, o.y - 5, 40, 10);
+    }
+  }
+
+  if (stage === 2) {
+    for (let v of vents) {
+      fill(30); stroke(100); strokeWeight(2);
+      rect(v.x - 20, v.y - 20, 40, 40, 5);
+      stroke(70); strokeWeight(3);
+      for (let i = -12; i <= 12; i += 6) {
+        line(v.x + i, v.y - 12, v.x + i, v.y + 12);
+      }
+      noStroke();
+    }
+    
+    if (isBeamActive) {
+      fill(255, 230, 0, 195); 
+      rect(blindNPC.x - beamWidth / 2, blindNPC.y, beamWidth, mapHeight); 
+      stroke(255, 80, 50); strokeWeight(3.5);
+      line(blindNPC.x - beamWidth / 2, blindNPC.y, blindNPC.x - beamWidth / 2, mapHeight);
+      line(blindNPC.x + beamWidth / 2, blindNPC.y, blindNPC.x + beamWidth / 2, mapHeight);
+      noStroke();
+    }
+    textSize(35); textAlign(CENTER, CENTER); text("🕶️", blindNPC.x, blindNPC.y);
+    textSize(14); fill(255); text("김눈뽕", blindNPC.x, blindNPC.y - 25);
+  }
+
+  if (stage === 1) {
+    if (!hasLighter) { fill(255, 100, 0); textSize(25); textAlign(CENTER, CENTER); text("🔥", lighter.x, lighter.y); }
+    if (burntCount === objects.length && !hasExcavator) {
+      fill(255, 220, 0); textSize(35); textAlign(CENTER, CENTER); text("🚜", excavator.x, excavator.y);
+    }
+  }
+  
+  if (stage === 2) {
+    if (!isKeyNPCAfraid) {
+      textSize(30); textAlign(CENTER, CENTER); text("🧍‍♂️", keyNPC.x, keyNPC.y);
+      textSize(14); fill(255); text("김열쇠", keyNPC.x, keyNPC.y - 35);
+    } else {
+      textSize(30); textAlign(CENTER, CENTER); text("🏃‍♂️💦", keyNPC.x, keyNPC.y);
+      textSize(14); fill(255, 100, 100); text("으아악!", keyNPC.x, keyNPC.y - 35);
+    }
+
+    if (isKeyNPCAfraid && !hasKey) {
+      textSize(25); textAlign(CENTER, CENTER); text("🔑", keyItem.x, keyItem.y);
+    }
+  }
+  
+  if (!cultistDestroyed) {
+    fill(255, 255, 0); textSize(45); textAlign(CENTER, CENTER); text(stage === 1 ? "⛪" : "🚉", cultist.x, cultist.y);
+  } else {
+    fill(50, 200); ellipse(cultist.x, cultist.y, 90, 60);
+    fill(255); textSize(16); textAlign(CENTER, CENTER); text("탈출구", cultist.x, cultist.y + 5);
+  }
+
+  if (stage === 1 && !hasExcavator) {
+    textSize(30); textAlign(CENTER, CENTER);
+    text("🏃‍♂️", robber.x, robber.y);
+    text("👤", clone.x, clone.y);
+  }
+
+  if (stage === 1 && hasExcavator) {
+    textSize(45); textAlign(CENTER, CENTER); text("🚜", player.x, player.y + 15);
+  } else if (stage === 2 && hasBat) {
+    drawStickman(player.x, player.y);
+    textSize(20); textAlign(CENTER, CENTER); text("🏏", player.x + 15, player.y - 10);
+    if (hasKey) {
+      textSize(18); text("🔑", player.x - 15, player.y - 10); 
+    }
+  } else {
+    drawStickman(player.x, player.y);
+  }
+}
+
+function handlePlay() {
+  let currentSpeed = (stage === 1 && hasExcavator) ? 6 : 4; 
+  
+  if (stage === 2) {
+    for (let c of cobwebs) {
+      if (dist(player.x, player.y, c.x, c.y) < 35) {
+        currentSpeed = 1.5;
+        fill(200, 200, 255); textSize(14); textAlign(CENTER, CENTER);
+        text("🕸️ 속도 저하!", player.x, player.y - 50);
+      }
+    }
+  }
+
+  let move = createVector(0, 0);
+  if (keyIsDown(65) || keyIsDown(LEFT_ARROW)) move.x -= currentSpeed;
+  if (keyIsDown(68) || keyIsDown(RIGHT_ARROW)) move.x += currentSpeed;
+  if (keyIsDown(87) || keyIsDown(UP_ARROW)) move.y -= currentSpeed;
+  if (keyIsDown(83) || keyIsDown(DOWN_ARROW)) move.y += currentSpeed;
+
+  let nextP = p5.Vector.add(player, move);
+  let canMove = true;
+  
+  for (let o of objects) {
+    if (!o.isBurnt && dist(nextP.x, nextP.y, o.x, o.y) < 30) canMove = false;
+  }
+  
+  if (canMove) {
+    player.x = constrain(nextP.x, 20, mapWidth - 20);
+    player.y = constrain(nextP.y, 20, mapHeight - 20);
+  }
+
+  if (stage === 2 && isKeyNPCAfraid && keyNPC.x > -50) {
+    keyNPC.x -= 3; 
+  }
+
+  if (stage === 2) {
+    for (let v of vents) {
+      if (dist(player.x, player.y, v.x, v.y) < 30) {
+        gameState = 'DIE_VENT'; 
+      }
+    }
+    
+    if (isBeamActive) {
+      if (player.x > blindNPC.x - beamWidth / 2 && player.x < blindNPC.x + beamWidth / 2 && player.y > blindNPC.y) {
+        gameState = 'DIE_BEAM';
+      }
+    }
+  }
+
+  if (stage === 1) {
+    if (!hasLighter && dist(player.x, player.y, lighter.x, lighter.y) < 40) {
+      showPrompt("E: 라이터 줍기");
+      if (keyIsDown(69)) hasLighter = true;
+    }
+    if (hasLighter && !hasExcavator) {
+      for (let o of objects) {
+        if (!o.isBurnt && dist(player.x, player.y, o.x, o.y) < 50) {
+          showPrompt("E: 제거");
+          if (keyIsDown(69)) {
+            o.isBurnt = true;
+            burntCount++;
+            if (burntCount === objects.length) excavator = createVector(o.x, o.y); 
+          }
+        }
+      }
+    }
+    if (burntCount === objects.length && !hasExcavator && dist(player.x, player.y, excavator.x, excavator.y) < 40) {
+      showPrompt("E: 변신!");
+      if (keyIsDown(69)) hasExcavator = true;
+    }
+    if (hasExcavator && !cultistDestroyed && dist(player.x, player.y, cultist.x, cultist.y) < 80) {
+      showPrompt("E: 철거!");
+      if (keyIsDown(69)) cultistDestroyed = true;
+    }
+    
+    chasePlayer(robber, 1.2 + (stage * 0.3), 180, 'DIE_ROBBER');
+    chasePlayer(clone, 1.0 + (stage * 0.3), 140, 'DIE_CLONE'); 
+  } 
+  else if (stage === 2) {
+    if (!hasBat) {
+      for (let o of objects) {
+        if (!o.isBurnt && dist(player.x, player.y, o.x, o.y) < 50) {
+          showPrompt("E: 상자 수색");
+          if (keyIsDown(69)) {
+            o.isBurnt = true; 
+            if (o.hasBatInside) hasBat = true; 
+          }
+        }
+      }
+    }
+    
+    if (hasBat && !isKeyNPCAfraid && dist(player.x, player.y, keyNPC.x, keyNPC.y) < 60) {
+      showPrompt("E: 방망이로 협박하기");
+      if (keyIsDown(69)) {
+        isKeyNPCAfraid = true;
+        keyItem = createVector(keyNPC.x, keyNPC.y + 20); 
+      }
+    }
+
+    if (isKeyNPCAfraid && !hasKey && dist(player.x, player.y, keyItem.x, keyItem.y) < 40) {
+      showPrompt("E: 열쇠 줍기");
+      if (keyIsDown(69)) {
+        hasKey = true;
+      }
+    }
+
+    if (hasKey && !cultistDestroyed && dist(player.x, player.y, cultist.x, cultist.y) < 80) {
+      showPrompt("E: 열쇠로 문 열기");
+      if (keyIsDown(69)) cultistDestroyed = true;
+    }
+  }
+
+  if (cultistDestroyed && dist(player.x, player.y, cultist.x, cultist.y) < 40) gameState = 'WIN';
+}
+
+function chasePlayer(v, speed, detectRange, dieState) {
+  let d = dist(player.x, player.y, v.x, v.y);
+  if (d < detectRange) { 
+    fill(255, 0, 0); textSize(25); textAlign(CENTER, CENTER);
+    text("❗", v.x, v.y - 30);
+    v.add(p5.Vector.sub(player, v).normalize().mult(speed));
+    if (d < 25) gameState = dieState;
+  }
+}
+
+function drawStickman(x, y) {
+  push(); translate(x, y); stroke(255); strokeWeight(3); noFill();
+  ellipse(0, -25, 20, 20); line(0, -15, 0, 10);
+  let a = (keyIsPressed) ? sin(frameCounter * 0.2) * 0.6 : 0;
+  line(0, -5, -15, -5 + a * 10); line(0, -5, 15, -5 - a * 10);
+  line(0, 10, -10 - a * 8, 30); line(0, 10, 10 + a * 8, 30);
+  pop();
+}
+
+function showPrompt(txt) { fill(255); textAlign(CENTER, CENTER); textSize(18); text(txt, player.x, player.y - 65); }
+function showOverlay(title, sub) { fill(0, 150); rect(0, 0, width, height); fill(255); textAlign(CENTER, CENTER); textSize(50); text(title, width/2, height/2 - 20); textSize(20); text(sub, width/2, height/2 + 40); }
+function showWinScreen() { fill(0, 200); rect(0, 0, width, height); fill(0, 255, 0); textAlign(CENTER, CENTER); textSize(50); text("탈출 성공!", width/2, height/2); fill(255); textSize(20); text("N을 눌러 다음 스테이지", width/2, height/2 + 60); }
+
+function showGameOver() { 
+  fill(0, 200); rect(0, 0, width, height); 
+  fill(255, 50, 50); textAlign(CENTER, CENTER); textSize(30); 
+  
+  if(gameState === 'DIE_VENT') {
+    text("벤트에 빠져 탈락했습니다!", width/2, height/2); 
+  } else if(gameState === 'DIE_BEAM') {
+    text("김눈뽕의 레이저에 감전되었습니다!", width/2, height/2); 
+  } else {
+    text("추격자에게 잡혔습니다!", width/2, height/2); 
+  }
+  
+  fill(255); textSize(20); 
+  text("R을 눌러 이 스테이지 재시작", width/2, height/2 + 60); 
+}
+
+function keyPressed() { 
+  if (key.toLowerCase() === 'r') { 
+    initGameFlow(); 
+    gameState = 'PLAY'; 
+  } 
+  if (gameState === 'WIN' && key.toLowerCase() === 'n') { 
+    stage++; 
+    initGameFlow(); 
+    gameState = 'PLAY'; 
+  } 
+}
+
+function mousePressed() { if (gameState === 'START') gameState = 'PLAY'; }
+</script>
+
+</body>
+</html>

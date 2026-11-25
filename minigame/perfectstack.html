@@ -1,0 +1,1122 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Perfect Stack Game</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.4.0/p5.js"></script>
+    <style>
+        html, body { margin: 0; padding: 0; }
+        body {
+            box-sizing: border-box;
+            height: 100vh;
+            display: flex; justify-content: center; align-items: center;
+            background-color: #f0f0f0;
+            overflow: hidden;
+            touch-action: none;
+            user-select: none; -webkit-user-select: none;
+        }
+        #game-container {
+            box-shadow: 0 0 20px rgba(0,0,0,0.15);
+            border-radius: 10px; overflow: hidden;
+            line-height: 0;
+        }
+        canvas { display: block; }
+    </style>
+</head>
+<body>
+    <div id="game-container"></div>
+
+    <script>
+        /*
+         * Perfect Stack
+         *  - 혼자하기: 기존과 동일한 450x450 한 판
+         *  - 같이하기: 같은 크기(450x450)의 판 2개를 좌우로 배치 + 상단 닉네임 헤더
+         *      · 각자 자기 판을 로컬에서 바로 시뮬레이션 (입력 지연 / 대기 없음)
+         *      · 내 판 상태를 초당 약 30번 상대에게 보내고, 상대 판은 받은 상태로 그림
+         *      · 화면 크기에 맞춰 전체를 자동 축소/확대 (헤더가 잘리지 않음)
+         */
+        const PerfectStackGame = (() => {
+            let instance = null;
+
+            function sketch(p) {
+                // =====================================================
+                // 상수
+                // =====================================================
+                const WORLD_W = 450, WORLD_H = 450;          // 한 판의 크기 (혼자하기/같이하기 동일)
+                const SOLO_W = WORLD_W, SOLO_H = WORLD_H;
+                const HEADER_H = 64;                          // 같이하기 상단 닉네임 헤더
+                const MATCH_W = WORLD_W * 2, MATCH_H = HEADER_H + WORLD_H;
+                const TOP_HIDDEN = 42;                        // minigame.html 이 iframe 위쪽 42px 를 가림
+                const BACK_BTN_SAFE = 72;                     // minigame.html 의 뒤로가기 버튼이 덮는 폭(px)
+                const MAX_K_MATCH = 1.6;                      // 같이하기 최대 확대 배율
+
+                const GROUND_MARGIN = 50;
+                const BLOCK_W = 175, BLOCK_H = 44, PLAYER_SIZE = 36;
+                const SPEED_BASE = 7.5, SPEED_PER_SCORE = 0.2;
+                const GRAVITY = 0.88, JUMP_V = -16.5;
+                const PX = WORLD_W / 2;                       // 플레이어 x 는 고정
+
+                const NICK_MAX = 8;
+                const INVITE_TIMEOUT = 15000, DECLINE_COOLDOWN = 10000;
+                const LINK_TIMEOUT = 15000, START_TIMEOUT = 25000;
+                const COUNTDOWN_MS = 3000;
+                const SNAP_MS = 33;                           // 상태 전송 간격 (약 30Hz)
+                const OPP_TIMEOUT_MS = 8000;                  // 이 시간 동안 아무것도 안 오면 이탈 처리
+
+                // 버튼 영역 (논리 좌표)
+                const START_SOLO_BTN = { x: 125, y: 200, w: 200, h: 56 };
+                const START_ONLINE_BTN = { x: 125, y: 275, w: 200, h: 56 };
+                const SOLO_RETRY_BTN = { x: 60, y: 330, w: 150, h: 50 };
+                const SOLO_MENU_BTN = { x: 240, y: 330, w: 150, h: 50 };
+                const RESULT_BTN = { x: MATCH_W / 2 - 100, y: HEADER_H + WORLD_H / 2 + 50, w: 200, h: 50 };
+
+                // 같이하기 목록 레이아웃
+                const LIST_Y = 110, ROW_H = 56, ROW_GAP = 6, ROWS_VIS = 4;
+                const rowRect = (i) => ({ x: 30, y: LIST_Y + i * (ROW_H + ROW_GAP), w: 390, h: ROW_H });
+                const invBtnRect = (i) => { const r = rowRect(i); return { x: r.x + r.w - 96, y: r.y + 10, w: 84, h: 34 }; };
+                const BACK_RECT = { x: 125, y: 404, w: 200, h: 36 };
+                const ACCEPT_RECT = { x: 70, y: 290, w: 150, h: 46 };
+                const DECLINE_RECT = { x: 235, y: 290, w: 150, h: 46 };
+                const CANCEL_RECT = { x: 125, y: 290, w: 200, h: 46 };
+                const SCROLL_UP = { x: 150, y: 362, w: 70, h: 28 };
+                const SCROLL_DN = { x: 230, y: 362, w: 70, h: 28 };
+
+                // =====================================================
+                // 상태
+                // =====================================================
+                // gameState: START | SOLO | ONLINE_LIST | ONLINE_LINK | MATCH | MATCH_OVER
+                let gameState = 'START';
+                let solo = null;
+                let me = null, opp = null;     // 같이하기: 내 판 / 상대 판
+                let bgHue = 200;
+                let L = { lw: SOLO_W, lh: SOLO_H, k: 1, pw: SOLO_W, ph: SOLO_H };   // 현재 레이아웃(논리 크기, 배율, 실제 픽셀 크기)
+
+                const net = {
+                    on: false,
+                    remotePlayers: {},
+                    myId: '',
+                    inviting: null,            // { to, seq, t0 }
+                    incoming: null,            // { from, seq, t0 }
+                    seenInv: {},
+                    declined: {},
+                    toast: null,
+                    scroll: 0,
+                    role: '',                  // 'L' 초대한 쪽 / 'R' 수락한 쪽
+                    oppId: '',
+                    link: 'none',
+                    linkT0: 0
+                };
+
+                const match = {
+                    startAt: 0,
+                    names: ['', ''],           // [나, 상대]
+                    lastRecv: 0,
+                    lastSend: 0,
+                    lastSentScore: -1,
+                    lastSentDead: false,
+                    result: '',                // win | lose | draw
+                    reason: ''                 // '' | opp
+                };
+
+                // =====================================================
+                // 유틸
+                // =====================================================
+                function makeRng(seed) {
+                    let s = (seed >>> 0) || 1;
+                    return () => {
+                        s = (s + 0x6D2B79F5) >>> 0;
+                        let t = s;
+                        t = Math.imul(t ^ (t >>> 15), t | 1);
+                        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+                        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+                    };
+                }
+
+                const inFrame = () => window.parent !== window;
+                function toMain(msg) { if (inFrame()) { try { window.parent.postMessage(msg, '*'); } catch (e) {} } }
+                function netSend(obj) { toMain({ type: 'SC_SEND', data: obj }); }
+                const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
+                const r1 = (v) => Math.round(v * 10) / 10;
+                const r2 = (v) => Math.round(v * 100) / 100;
+
+                function sanitizeNick(v) {
+                    if (typeof v !== 'string') return '';
+                    const clean = v
+                        .replace(/[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2066-\u2069]/g, '')
+                        .replace(/\s+/g, ' ').trim();
+                    return Array.from(clean).slice(0, NICK_MAX).join('');
+                }
+                function nickLabel(id, pl) {
+                    const nick = sanitizeNick(pl && pl.name);
+                    if (id === net.myId) return nick || '나';
+                    return nick || String(id).substring(0, 5);
+                }
+                function labelOf(id) { return nickLabel(id, net.remotePlayers[id]); }
+                function showToast(msg) { net.toast = { msg, until: Date.now() + 2800 }; }
+                function inRect(mx, my, r) { return mx >= r.x && mx <= r.x + r.w && my >= r.y && my <= r.y + r.h; }
+
+                // HSV(0~360, 0~1, 0~1) → [r, g, b]
+                function hsv(h, s, v) {
+                    h = ((h % 360) + 360) % 360;
+                    const c = v * s, x = c * (1 - Math.abs((h / 60) % 2 - 1)), m = v - c;
+                    let r, g, b;
+                    if (h < 60) { r = c; g = x; b = 0; }
+                    else if (h < 120) { r = x; g = c; b = 0; }
+                    else if (h < 180) { r = 0; g = c; b = x; }
+                    else if (h < 240) { r = 0; g = x; b = c; }
+                    else if (h < 300) { r = x; g = 0; b = c; }
+                    else { r = c; g = 0; b = x; }
+                    return [Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255)];
+                }
+                const rgbCache = {};
+                function blockRgb(h) {
+                    const k = (((Math.round(h) % 360) + 360) % 360);
+                    return rgbCache[k] || (rgbCache[k] = hsv(k, 0.6, 0.9));
+                }
+
+                // =====================================================
+                // 레이아웃: 화면에 맞춰 자동 배율 (헤더/판이 잘리지 않도록)
+                // =====================================================
+                function syncLayout() {
+                    const isMatch = gameState === 'MATCH' || gameState === 'MATCH_OVER';
+                    const lw = isMatch ? MATCH_W : SOLO_W;
+                    const lh = isMatch ? MATCH_H : SOLO_H;
+                    const hidden = inFrame() ? TOP_HIDDEN : 0;
+                    const aw = Math.max(240, window.innerWidth - 12);
+                    const ah = Math.max(240, window.innerHeight - hidden - 12);
+                    let k = Math.min(aw / lw, ah / lh, isMatch ? MAX_K_MATCH : 1);
+                    k = Math.max(0.3, Math.floor(k * 100) / 100);
+                    if (lw !== L.lw || lh !== L.lh || k !== L.k) {
+                        L = { lw, lh, k, pw: Math.round(lw * k), ph: Math.round(lh * k) };
+                        p.resizeCanvas(L.pw, L.ph, true);
+                    }
+                }
+
+                // 뒤로가기 버튼(화면 좌상단)에 이름이 가리지 않도록 논리 좌표로 환산한 안전 폭
+                function leftSafe() {
+                    if (!inFrame()) return 0;
+                    const canvasLeft = (window.innerWidth - L.pw) / 2;
+                    return Math.max(0, (BACK_BTN_SAFE - canvasLeft) / L.k);
+                }
+
+                // =====================================================
+                // 판(Board) 로직 — 혼자하기 / 내 판 / 상대 판 공용
+                // =====================================================
+                function makeBoard(seed) {
+                    return {
+                        score: 0,
+                        state: 'PLAY',                         // PLAY | GAMEOVER
+                        shake: 0,
+                        blocks: [],                            // { x, y, vx, a(active), hue }
+                        particles: [],
+                        camY: 0,
+                        rng: makeRng(seed),
+                        floor: WORLD_H - GROUND_MARGIN,
+                        py: WORLD_H - GROUND_MARGIN - PLAYER_SIZE,
+                        vy: 0,
+                        jumping: false
+                    };
+                }
+
+                function jump(b) {
+                    if (b.state === 'PLAY' && !b.jumping) { b.vy = JUMP_V; b.jumping = true; return true; }
+                    return false;
+                }
+
+                function burst(b, x, y, rgb) {
+                    for (let i = 0; i < 15; i++) {
+                        b.particles.push({ x, y, vx: p.random(-4, 4), vy: p.random(-4, 4), a: 255, c: rgb, size: p.random(5, 9) });
+                    }
+                }
+
+                function spawnBlock(b) {
+                    const side = b.rng() < 0.5 ? 'L' : 'R';
+                    const speed = SPEED_BASE + b.score * SPEED_PER_SCORE;
+                    b.blocks.push({
+                        x: side === 'L' ? 0 : WORLD_W - BLOCK_W,
+                        y: b.floor - BLOCK_H,
+                        vx: side === 'L' ? speed : -speed,
+                        a: true,
+                        hue: Math.round((bgHue + 180) % 360)
+                    });
+                }
+
+                function moveBlock(k, s) {
+                    k.x += k.vx * s;
+                    if (k.x <= 0 || k.x + BLOCK_W >= WORLD_W) {
+                        k.vx *= -1;
+                        k.x = Math.max(0, Math.min(WORLD_W - BLOCK_W, k.x));
+                    }
+                }
+
+                // 물리 한 단계 (s: 60fps 한 프레임 = 1)
+                function stepBoard(b, s) {
+                    if (b.state !== 'PLAY') return;
+                    if (!b.blocks.some(k => k.a)) spawnBlock(b);
+
+                    let g = GRAVITY;
+                    if (b.vy > 0 && b.vy < 2) g *= 0.65;
+                    b.vy += g * s;
+                    b.py += b.vy * s;
+
+                    if (b.py > b.floor - PLAYER_SIZE) {
+                        if (b.jumping && b.floor < WORLD_H - GROUND_MARGIN) {
+                            b.state = 'GAMEOVER';
+                            b.shake = 25;
+                            return;
+                        }
+                        b.py = b.floor - PLAYER_SIZE;
+                        b.vy = 0;
+                        b.jumping = false;
+                    }
+
+                    for (const k of b.blocks) {
+                        if (!k.a) continue;
+                        moveBlock(k, s);
+                        const bottom = b.py + PLAYER_SIZE;
+                        if (b.vy > 0 && bottom >= k.y && bottom <= k.y + 30 &&
+                            PX + PLAYER_SIZE / 2 > k.x && PX - PLAYER_SIZE / 2 < k.x + BLOCK_W) {
+                            k.a = false;
+                            b.py = k.y - PLAYER_SIZE;
+                            b.vy = 0;
+                            b.jumping = false;
+                            b.floor = k.y;
+                            b.score++;
+                            b.shake = 6;
+                            burst(b, PX, k.y, blockRgb(k.hue));
+                            // 화면 아래로 사라진 블록 정리 (오래 할수록 느려지는 것 방지)
+                            b.blocks = b.blocks.filter(o => o.a || o.y < b.floor + 600);
+                            break;
+                        }
+                    }
+                }
+
+                // 상대 판 보간용: 받은 상태에서 앞으로 조금 더 진행시켜 부드럽게 보이게 함 (점수/판정은 건드리지 않음)
+                function extrapolate(b, s) {
+                    if (b.state !== 'PLAY') return;
+                    for (const k of b.blocks) if (k.a) moveBlock(k, s);
+                    let g = GRAVITY;
+                    if (b.vy > 0 && b.vy < 2) g *= 0.65;
+                    b.vy += g * s;
+                    b.py += b.vy * s;
+                    const lim = b.floor - PLAYER_SIZE;
+                    if (b.py > lim) { b.py = lim; b.vy = 0; b.jumping = false; }
+                }
+
+                // 화면 전용 갱신 (파티클 / 흔들림 / 카메라)
+                function updateVisual(b, dt) {
+                    for (let i = b.particles.length - 1; i >= 0; i--) {
+                        const pt = b.particles[i];
+                        pt.x += pt.vx * dt;
+                        pt.y += pt.vy * dt;
+                        pt.a -= 12 * dt;
+                        if (pt.a <= 0) b.particles.splice(i, 1);
+                    }
+                    if (b.shake > 0) {
+                        b.shake *= Math.pow(0.85, dt);
+                        if (b.shake < 0.1) b.shake = 0;
+                    }
+                    const target = p.map(b.floor, WORLD_H - 100, 100, 0, 200);
+                    b.camY = p.lerp(b.camY, target, 1 - Math.pow(0.88, dt));
+                }
+
+                function drawBoard(b) {
+                    p.push();
+                    if (b.shake > 0) p.translate(p.random(-b.shake, b.shake), p.random(-b.shake, b.shake));
+                    p.translate(0, b.camY);
+                    p.noStroke();
+
+                    for (const k of b.blocks) {
+                        const c = blockRgb(k.hue);
+                        p.fill(c[0], c[1], c[2]);
+                        p.rect(k.x, k.y, BLOCK_W, BLOCK_H, 4);
+                        p.fill(255, 40);
+                        p.rect(k.x, k.y, BLOCK_W, 4, 2);
+                    }
+
+                    p.push();
+                    p.translate(PX, b.py + PLAYER_SIZE / 2);
+                    const sq = p.map(Math.abs(b.vy), 0, 17, 1, 1.3);
+                    p.scale(2 - sq, sq);
+                    p.fill(45);
+                    p.rect(-PLAYER_SIZE / 2, -PLAYER_SIZE / 2, PLAYER_SIZE, PLAYER_SIZE, 6);
+                    p.fill(255);
+                    p.rect(-10, -8, 7, 12, 1);
+                    p.rect(3, -8, 7, 12, 1);
+                    p.pop();
+
+                    for (const pt of b.particles) {
+                        p.fill(pt.c[0], pt.c[1], pt.c[2], pt.a);
+                        p.ellipse(pt.x, pt.y, pt.size);
+                    }
+                    p.pop();
+                }
+
+                function drawScore(score) {
+                    p.noStroke();
+                    p.fill(45);
+                    p.textStyle(p.NORMAL);
+                    p.textAlign(p.CENTER, p.TOP);
+                    p.textSize(90);
+                    p.text(score, WORLD_W / 2, 30);
+                }
+
+                function drawButton(x, y, w, h, label, col, fs = 20) {
+                    p.push();
+                    p.noStroke();
+                    p.fill(col[0], col[1], col[2]);
+                    p.rect(x, y, w, h, 12);
+                    p.fill(255);
+                    p.textStyle(p.NORMAL);
+                    p.textAlign(p.CENTER, p.CENTER);
+                    p.textSize(fs);
+                    p.text(label, x + w / 2, y + h / 2);
+                    p.pop();
+                }
+                function drawDim(w, h) { p.noStroke(); p.fill(0, 180); p.rect(0, 0, w, h); }
+
+                // =====================================================
+                // 혼자하기
+                // =====================================================
+                function startSolo() {
+                    solo = makeBoard((Math.random() * 4294967296) >>> 0);
+                    gameState = 'SOLO';
+                }
+
+                function updateSolo(dt) {
+                    const steps = Math.max(1, Math.ceil(dt));
+                    const s = dt / steps;
+                    for (let i = 0; i < steps && solo.state === 'PLAY'; i++) stepBoard(solo, s);
+                    updateVisual(solo, dt);
+                }
+
+                function drawSolo() {
+                    drawBoard(solo);
+                    drawScore(solo.score);
+                    if (solo.state === 'GAMEOVER') {
+                        drawDim(SOLO_W, SOLO_H);
+                        p.fill(255);
+                        p.textAlign(p.CENTER, p.CENTER);
+                        p.textSize(45);
+                        p.text("GAME OVER", SOLO_W / 2, SOLO_H / 2 - 40);
+                        p.textSize(26);
+                        p.text("SCORE: " + solo.score, SOLO_W / 2, SOLO_H / 2 + 10);
+                        drawButton(SOLO_RETRY_BTN.x, SOLO_RETRY_BTN.y, SOLO_RETRY_BTN.w, SOLO_RETRY_BTN.h, "다시하기", [40, 167, 69]);
+                        drawButton(SOLO_MENU_BTN.x, SOLO_MENU_BTN.y, SOLO_MENU_BTN.w, SOLO_MENU_BTN.h, "메뉴로", [0, 123, 255]);
+                    }
+                }
+
+                // =====================================================
+                // 같이하기: 대전 (각자 로컬 시뮬레이션 + 상태 스트리밍)
+                // =====================================================
+                function beginMatch(seed) {
+                    me = makeBoard(seed);      // 같은 seed → 같은 블록 방향 순서
+                    opp = makeBoard(seed);
+                    match.names = [labelOf(net.myId), labelOf(net.oppId)];
+                    match.startAt = Date.now() + COUNTDOWN_MS;
+                    match.lastRecv = Date.now();
+                    match.lastSend = 0;
+                    match.lastSentScore = -1;
+                    match.lastSentDead = false;
+                    match.result = '';
+                    match.reason = '';
+                    net.on = false;
+                    gameState = 'MATCH';
+                }
+
+                function sendSnapshot(now, force) {
+                    if (!me) return;
+                    const dead = me.state !== 'PLAY';
+                    const changed = me.score !== match.lastSentScore || dead !== match.lastSentDead;
+                    if (!force && !changed && now - match.lastSend < SNAP_MS) return;
+                    match.lastSend = now;
+                    match.lastSentScore = me.score;
+                    match.lastSentDead = dead;
+                    netSend({
+                        k: 's',
+                        sc: me.score,
+                        st: dead ? 1 : 0,
+                        py: r2(me.py), pv: r2(me.vy), jp: me.jumping ? 1 : 0,
+                        fl: r1(me.floor),
+                        bl: me.blocks.slice(-14).map(b => [r1(b.x), r1(b.y), r2(b.vx), b.a ? 1 : 0, b.hue])
+                    });
+                }
+
+                // 상대가 보낸 상태 반영 (신뢰할 수 없는 입력이므로 모두 검증)
+                function onSnap(d) {
+                    if (!opp || (gameState !== 'MATCH' && gameState !== 'MATCH_OVER')) return;
+                    if (!isNum(d.sc) || !isNum(d.py) || !isNum(d.pv) || !isNum(d.fl) || !Array.isArray(d.bl) || d.bl.length > 20) return;
+                    const blocks = [];
+                    for (const a of d.bl) {
+                        if (!Array.isArray(a) || a.length < 5 || !a.slice(0, 5).every(isNum)) return;
+                        blocks.push({ x: a[0], y: a[1], vx: a[2], a: a[3] === 1, hue: a[4] });
+                    }
+                    match.lastRecv = Date.now();
+
+                    const sc = Math.max(0, Math.min(1000000, Math.floor(d.sc)));
+                    const wasAlive = opp.state === 'PLAY';
+                    if (sc > opp.score) {
+                        const landed = blocks.find(b => !b.a && Math.abs(b.y - d.fl) < 1) || blocks[0];
+                        burst(opp, PX, d.fl, landed ? blockRgb(landed.hue) : [120, 200, 160]);
+                        opp.shake = 6;
+                    }
+                    opp.score = sc;
+                    opp.state = d.st === 1 ? 'GAMEOVER' : 'PLAY';
+                    if (wasAlive && d.st === 1) opp.shake = 25;
+                    opp.py = d.py; opp.vy = d.pv; opp.jumping = d.jp === 1;
+                    opp.floor = d.fl;
+                    opp.blocks = blocks;
+                }
+
+                // 승패 판정
+                //  - 둘 다 탈락: 점수 비교 (같으면 무승부)
+                //  - 한 명 탈락 후 남은 사람이 그 점수를 넘기면 즉시 승리
+                function evaluate() {
+                    if (gameState !== 'MATCH' || !me || !opp) return;
+                    const meDead = me.state !== 'PLAY', oppDead = opp.state !== 'PLAY';
+                    let r = '';
+                    if (meDead && oppDead) r = me.score > opp.score ? 'win' : (me.score < opp.score ? 'lose' : 'draw');
+                    else if (oppDead && me.score > opp.score) r = 'win';
+                    else if (meDead && opp.score > me.score) r = 'lose';
+                    if (r) finishMatch(r, '');
+                }
+
+                function finishMatch(result, reason) {
+                    if (gameState !== 'MATCH') return;
+                    sendSnapshot(Date.now(), true);
+                    match.result = result;
+                    match.reason = reason;
+                    gameState = 'MATCH_OVER';
+                }
+
+                function opponentGone() {
+                    if (gameState === 'MATCH') finishMatch('win', 'opp');
+                }
+
+                function updateMatch(dt) {
+                    if (!me || !opp) return;
+                    const now = Date.now();
+                    if (gameState === 'MATCH') {
+                        if (now >= match.startAt) {
+                            const steps = Math.max(1, Math.ceil(dt));
+                            const s = dt / steps;
+                            for (let i = 0; i < steps && me.state === 'PLAY'; i++) stepBoard(me, s);
+                            extrapolate(opp, dt);
+                        }
+                        sendSnapshot(now, false);
+                        evaluate();
+                        if (gameState === 'MATCH' && now - match.lastRecv > OPP_TIMEOUT_MS) opponentGone();
+                    }
+                    updateVisual(me, dt);
+                    updateVisual(opp, dt);
+                }
+
+                function drawHeaderName(i) {
+                    const label = match.names[i] || '';
+                    const txt = (i === 0 && label !== '나') ? label + ' (나)' : label;
+                    p.textStyle(p.BOLD);
+                    p.textAlign(p.CENTER, p.CENTER);
+                    let size = 24;
+                    p.textSize(size);
+                    while (size > 12 && p.textWidth(txt) > 300) { size -= 1; p.textSize(size); }
+                    const w = p.textWidth(txt);
+                    let cx = i * WORLD_W + WORLD_W / 2;
+                    if (i === 0) {
+                        cx = Math.max(cx, leftSafe() + w / 2 + 8);
+                        cx = Math.min(cx, WORLD_W - 40 - w / 2);
+                    }
+                    p.noStroke();
+                    p.fill(255);
+                    p.text(txt, cx, HEADER_H / 2);
+                }
+
+                function drawPanel(i, b, other) {
+                    p.push();
+                    p.translate(i * WORLD_W, HEADER_H);
+                    const ctx = p.drawingContext;
+                    ctx.save();
+                    ctx.beginPath();
+                    ctx.rect(0, 0, WORLD_W, WORLD_H);
+                    ctx.clip();
+
+                    const bg = hsv(bgHue, 0.15, 0.95);
+                    p.noStroke();
+                    p.fill(bg[0], bg[1], bg[2]);
+                    p.rect(0, 0, WORLD_W, WORLD_H);
+                    drawBoard(b);
+                    drawScore(b.score);
+
+                    const mine = i === 0;
+                    if (b.state === 'GAMEOVER') {
+                        p.fill(0, 150);
+                        p.rect(0, 0, WORLD_W, WORLD_H);
+                        p.fill(255);
+                        p.textAlign(p.CENTER, p.CENTER);
+                        p.textStyle(p.NORMAL);
+                        p.textSize(40);
+                        p.text("GAME OVER", WORLD_W / 2, WORLD_H / 2 - 20);
+                        p.textSize(22);
+                        p.text("SCORE: " + b.score, WORLD_W / 2, WORLD_H / 2 + 24);
+                        if (mine && other.state === 'PLAY' && gameState === 'MATCH') {
+                            p.textSize(14);
+                            p.fill(253, 230, 138);
+                            p.text("상대 진행 중... (상대 " + other.score + "점)", WORLD_W / 2, WORLD_H / 2 + 56);
+                        }
+                    } else if (mine && other.state !== 'PLAY' && gameState === 'MATCH') {
+                        p.fill(0, 170);
+                        p.rect(20, WORLD_H - 46, WORLD_W - 40, 30, 15);
+                        p.fill(253, 230, 138);
+                        p.textAlign(p.CENTER, p.CENTER);
+                        p.textStyle(p.NORMAL);
+                        p.textSize(14);
+                        p.text("상대 탈락! " + (other.score + 1) + "점 이상이면 승리", WORLD_W / 2, WORLD_H - 31);
+                    }
+                    ctx.restore();
+                    p.pop();
+                }
+
+                function drawCountdown() {
+                    const left = match.startAt - Date.now();
+                    if (left <= 0) return;
+                    p.noStroke();
+                    p.fill(0, 120);
+                    p.rect(0, HEADER_H, MATCH_W, WORLD_H);
+                    p.fill(255, 215, 0);
+                    p.textStyle(p.BOLD);
+                    p.textAlign(p.CENTER, p.CENTER);
+                    p.textSize(130);
+                    p.text(Math.ceil(left / 1000), MATCH_W / 2, HEADER_H + WORLD_H / 2 - 20);
+                    p.fill(255);
+                    p.textStyle(p.NORMAL);
+                    p.textSize(16);
+                    p.text("스페이스 / 클릭으로 점프!", MATCH_W / 2, HEADER_H + WORLD_H / 2 + 60);
+                }
+
+                function drawMatchResult() {
+                    const titles = { win: '🎉 승리!', lose: '😢 패배', draw: '🤝 무승부' };
+                    p.noStroke();
+                    p.fill(0, 190);
+                    p.rect(0, HEADER_H, MATCH_W, WORLD_H);
+                    p.fill(255);
+                    p.textAlign(p.CENTER, p.CENTER);
+                    p.textStyle(p.BOLD);
+                    p.textSize(44);
+                    p.text(titles[match.result] || '', MATCH_W / 2, HEADER_H + WORLD_H / 2 - 70);
+                    p.textStyle(p.NORMAL);
+                    p.textSize(22);
+                    p.text(match.names[0] + '  ' + me.score + '  :  ' + opp.score + '  ' + match.names[1],
+                        MATCH_W / 2, HEADER_H + WORLD_H / 2 - 15);
+                    if (match.reason === 'opp') {
+                        p.textSize(15);
+                        p.fill(253, 230, 138);
+                        p.text("상대가 나가서 승리했어요", MATCH_W / 2, HEADER_H + WORLD_H / 2 + 20);
+                    }
+                    drawButton(RESULT_BTN.x, RESULT_BTN.y, RESULT_BTN.w, RESULT_BTN.h, "메인으로", [0, 123, 255]);
+                }
+
+                function drawMatch() {
+                    p.background(240);
+                    // 상단 닉네임 헤더
+                    p.noStroke();
+                    p.fill(0, 166, 230);
+                    p.rect(0, 0, MATCH_W, HEADER_H);
+                    p.fill(0, 120, 175);
+                    p.rect(0, HEADER_H - 3, MATCH_W, 3);
+                    drawHeaderName(0);
+                    drawHeaderName(1);
+                    p.fill(255, 255, 255, 200);
+                    p.textStyle(p.BOLD);
+                    p.textAlign(p.CENTER, p.CENTER);
+                    p.textSize(16);
+                    p.text('VS', MATCH_W / 2, HEADER_H / 2);
+
+                    drawPanel(0, me, opp);
+                    drawPanel(1, opp, me);
+
+                    // 판 사이 구분선
+                    p.stroke(255, 255, 255, 200);
+                    p.strokeWeight(3);
+                    p.line(WORLD_W, HEADER_H, WORLD_W, MATCH_H);
+                    p.noStroke();
+
+                    if (gameState === 'MATCH') drawCountdown();
+                    else drawMatchResult();
+                }
+
+                function leaveMatch() {
+                    toMain({ type: 'SC_CLOSE' });
+                    toMain({ type: 'SC_SET', on: false, match: null, inv: null, rep: null });
+                    net.on = false; net.inviting = null; net.incoming = null;
+                    net.role = ''; net.oppId = ''; net.link = 'none';
+                    me = null; opp = null;
+                    gameState = 'START';
+                }
+
+                // =====================================================
+                // 같이하기: 접속자 목록 / 초대 / 연결
+                // =====================================================
+                function onlineRows() {
+                    const rows = [];
+                    const now = Date.now();
+                    for (const id in net.remotePlayers) {
+                        if (id === net.myId) continue;
+                        const pl = net.remotePlayers[id];
+                        if (!pl || typeof pl !== 'object') continue;
+                        let status = 'main';
+                        if (pl.scMatch) status = 'busy';
+                        else if (pl.scOn) status = 'wait';
+                        rows.push({
+                            id, name: nickLabel(id, pl), status,
+                            declLeft: Math.max(0, ((net.declined[id] || 0) - now) / 1000)
+                        });
+                    }
+                    const order = { wait: 0, main: 1, busy: 2 };
+                    rows.sort((a, b) => (order[a.status] - order[b.status]) || a.name.localeCompare(b.name));
+                    return rows;
+                }
+
+                function canInvite(r) {
+                    return r.status === 'wait' && r.declLeft <= 0 && !net.inviting && !net.incoming;
+                }
+
+                function sendInvite(id) {
+                    if (net.inviting || net.incoming) return;
+                    const seq = Date.now();
+                    net.inviting = { to: id, seq, t0: Date.now() };
+                    toMain({ type: 'SC_SET', inv: { to: id, seq }, rep: null });
+                }
+
+                function cancelInvite(msg) {
+                    net.inviting = null;
+                    toMain({ type: 'SC_SET', inv: null });
+                    if (msg) showToast(msg);
+                }
+
+                function declineIncoming() {
+                    const inc = net.incoming; if (!inc) return;
+                    net.incoming = null;
+                    toMain({ type: 'SC_SET', rep: { to: inc.from, seq: inc.seq, ok: false } });
+                }
+
+                function enterLink(role, oppId) {
+                    net.role = role;
+                    net.oppId = oppId;
+                    net.link = 'connecting';
+                    net.linkT0 = Date.now();
+                    gameState = 'ONLINE_LINK';
+                }
+
+                function acceptIncoming() {
+                    const inc = net.incoming; if (!inc) return;
+                    net.incoming = null;
+                    enterLink('R', inc.from);
+                    toMain({ type: 'SC_EXPECT', peerId: inc.from });
+                    toMain({ type: 'SC_SET', match: inc.from, inv: null, rep: { to: inc.from, seq: inc.seq, ok: true } });
+                }
+
+                function onAccepted(to) {
+                    net.inviting = null;
+                    enterLink('L', to);
+                    toMain({ type: 'SC_SET', match: to, inv: null });
+                    toMain({ type: 'SC_CONNECT', peerId: to });
+                }
+
+                function failLink(msg) {
+                    toMain({ type: 'SC_CLOSE' });
+                    toMain({ type: 'SC_SET', match: null, inv: null, rep: null });
+                    net.role = ''; net.oppId = ''; net.link = 'none';
+                    gameState = 'ONLINE_LIST';
+                    if (msg) showToast(msg);
+                }
+
+                function scanNet() {
+                    if (!net.on) return;
+                    const now = Date.now();
+
+                    if (net.inviting) {
+                        const t = net.remotePlayers[net.inviting.to];
+                        if (!t) {
+                            cancelInvite('상대가 방을 나갔어요');
+                        } else if (t.rep && t.rep.to === net.myId && t.rep.seq === net.inviting.seq) {
+                            const to = net.inviting.to;
+                            if (t.rep.ok === true) onAccepted(to);
+                            else { net.declined[to] = Date.now() + DECLINE_COOLDOWN; cancelInvite('초대가 거절됐어요'); }
+                            return;
+                        } else if (t.scMatch && t.scMatch !== net.myId) {
+                            cancelInvite('상대가 다른 대전을 시작했어요');
+                        } else if (now - net.inviting.t0 > INVITE_TIMEOUT) {
+                            cancelInvite('응답이 없어 초대가 취소됐어요');
+                        }
+                    }
+
+                    if (gameState === 'ONLINE_LIST') {
+                        for (const id in net.remotePlayers) {
+                            if (id === net.myId) continue;
+                            const pl = net.remotePlayers[id];
+                            if (!pl || !pl.inv || pl.inv.to !== net.myId || !Number.isFinite(pl.inv.seq)) continue;
+                            const key = id + ':' + pl.inv.seq;
+                            if (net.seenInv[key]) continue;
+                            net.seenInv[key] = now;
+                            if (net.incoming || net.inviting) {
+                                toMain({ type: 'SC_SET', rep: { to: id, seq: pl.inv.seq, ok: false } });
+                                continue;
+                            }
+                            net.incoming = { from: id, seq: pl.inv.seq, t0: now };
+                        }
+                    }
+
+                    if (net.incoming) {
+                        const s = net.remotePlayers[net.incoming.from];
+                        if (!s || !s.inv || s.inv.to !== net.myId || s.inv.seq !== net.incoming.seq) {
+                            net.incoming = null;
+                            showToast('초대가 취소됐어요');
+                        } else if (now - net.incoming.t0 > INVITE_TIMEOUT) {
+                            net.incoming = null;
+                        }
+                    }
+                }
+
+                function enterOnlineList() {
+                    if (!inFrame()) { alert("같이하기는 미니게임 월드에서 이용할 수 있어요!"); return; }
+                    net.on = true;
+                    net.inviting = null; net.incoming = null;
+                    net.scroll = 0; net.toast = null;
+                    gameState = 'ONLINE_LIST';
+                    toMain({ type: 'SC_SET', on: true, match: null, inv: null, rep: null });
+                }
+
+                function leaveOnlineList() {
+                    net.on = false;
+                    net.inviting = null; net.incoming = null;
+                    toMain({ type: 'SC_SET', on: false, match: null, inv: null, rep: null });
+                    gameState = 'START';
+                }
+
+                // 연결 이벤트 (메인 월드가 SC_LINK 로 전달)
+                function onLinkEvent(state) {
+                    if (state === 'open') {
+                        if (gameState !== 'ONLINE_LINK') return;
+                        net.link = 'open';
+                        net.linkT0 = Date.now();
+                        if (net.role === 'L') {
+                            const seed = (Math.random() * 4294967296) >>> 0;
+                            netSend({ k: 'start', seed: seed });
+                            beginMatch(seed);
+                        }
+                    } else {
+                        if (gameState === 'ONLINE_LINK') failLink('연결이 끊어졌어요');
+                        else if (gameState === 'MATCH') opponentGone();
+                    }
+                }
+
+                function onNetData(d) {
+                    if (!d || typeof d.k !== 'string') return;
+                    if (d.k === 's') { onSnap(d); return; }
+                    if (d.k === 'start') {
+                        if (net.role === 'R' && gameState === 'ONLINE_LINK' && Number.isInteger(d.seed)) beginMatch(d.seed >>> 0);
+                    }
+                }
+
+                function linkTick() {
+                    if (net.toast && Date.now() > net.toast.until) net.toast = null;
+                    if (net.on) scanNet();
+                    if (gameState === 'ONLINE_LINK') {
+                        const el = Date.now() - net.linkT0;
+                        if (net.link !== 'open' && el > LINK_TIMEOUT) failLink('연결에 실패했어요. 다시 시도해 주세요');
+                        else if (net.link === 'open' && net.role === 'R' && el > START_TIMEOUT) failLink('상대 응답이 없어요');
+                    }
+                }
+
+                // =====================================================
+                // 시작 / 같이하기 목록 화면 (450x450 기준)
+                // =====================================================
+                function drawOverlayBox(y, h, col) {
+                    p.push();
+                    p.noStroke();
+                    p.fill(0, 180);
+                    p.rect(0, 0, SOLO_W, SOLO_H);
+                    p.fill(30, 41, 59);
+                    p.stroke(col[0], col[1], col[2]);
+                    p.strokeWeight(3);
+                    p.rect(40, y, 370, h, 14);
+                    p.pop();
+                }
+
+                function drawStartScreen() {
+                    drawDim(SOLO_W, SOLO_H);
+                    p.fill(255);
+                    p.textStyle(p.NORMAL);
+                    p.textAlign(p.CENTER, p.CENTER);
+                    p.textSize(32);
+                    p.text("PERFECT STACK", SOLO_W / 2, 110);
+                    p.textSize(14);
+                    p.text("벽에 튕기는 블록을 타이밍 맞춰 밟으세요!", SOLO_W / 2, 150);
+                    drawButton(START_SOLO_BTN.x, START_SOLO_BTN.y, START_SOLO_BTN.w, START_SOLO_BTN.h, "혼자하기", [40, 167, 69]);
+                    drawButton(START_ONLINE_BTN.x, START_ONLINE_BTN.y, START_ONLINE_BTN.w, START_ONLINE_BTN.h, "같이하기", [14, 116, 144]);
+                    p.fill(220);
+                    p.textSize(12);
+                    p.text("같이하기는 같은 방의 플레이어와 1:1 대결", SOLO_W / 2, 360);
+                }
+
+                function drawOnlineRow(r, i) {
+                    const rc = rowRect(i), b = invBtnRect(i);
+                    p.push();
+                    p.noStroke();
+                    p.fill(15, 23, 42, r.declLeft > 0 ? 100 : 230);
+                    p.rect(rc.x, rc.y, rc.w, rc.h, 10);
+                    p.fill(255);
+                    p.textStyle(p.NORMAL);
+                    p.textAlign(p.LEFT, p.CENTER);
+                    p.textSize(15);
+                    p.text(r.name, rc.x + 14, rc.y + 18);
+
+                    let st, col;
+                    if (r.declLeft > 0) { st = "🔴 거절됨 · " + Math.ceil(r.declLeft) + "초 뒤 다시 가능"; col = [248, 113, 113]; }
+                    else if (r.status === 'wait') { st = "🟢 대기 중"; col = [74, 222, 128]; }
+                    else if (r.status === 'busy') { st = "🟠 대전 중"; col = [251, 146, 60]; }
+                    else { st = "⚪ 접속 중 (초대 불가)"; col = [148, 163, 184]; }
+                    p.fill(col[0], col[1], col[2]);
+                    p.textSize(11);
+                    p.text(st, rc.x + 14, rc.y + 38);
+                    p.pop();
+
+                    if (r.status !== 'busy') {
+                        const ok = canInvite(r);
+                        drawButton(b.x, b.y, b.w, b.h, "초대", ok ? [34, 211, 238] : [71, 85, 105], 14);
+                    }
+                }
+
+                function drawOnlineScreen() {
+                    drawDim(SOLO_W, SOLO_H);
+                    p.fill(255);
+                    p.textStyle(p.NORMAL);
+                    p.textAlign(p.CENTER, p.CENTER);
+                    p.textSize(24);
+                    p.text("같이하기 🌐", SOLO_W / 2, 40);
+                    p.textSize(12);
+                    p.fill(230);
+                    p.text("같은 방의 플레이어를 초대해 1대1로 대결하세요", SOLO_W / 2, 72);
+
+                    p.noStroke();
+                    p.fill(0, 90);
+                    p.rect(20, 92, 410, 300, 12);
+
+                    const rows = onlineRows();
+                    const maxScroll = Math.max(0, rows.length - ROWS_VIS);
+                    net.scroll = Math.max(0, Math.min(maxScroll, net.scroll));
+
+                    if (rows.length === 0) {
+                        p.fill(230);
+                        p.textSize(14);
+                        p.textAlign(p.CENTER, p.CENTER);
+                        p.text(Object.keys(net.remotePlayers).length === 0 ? "접속자 목록을 불러오는 중..." : "방에 다른 플레이어가 없어요",
+                            SOLO_W / 2, 220);
+                    }
+                    rows.slice(net.scroll, net.scroll + ROWS_VIS).forEach((r, i) => drawOnlineRow(r, i));
+
+                    if (rows.length > ROWS_VIS) {
+                        drawButton(SCROLL_UP.x, SCROLL_UP.y, SCROLL_UP.w, SCROLL_UP.h, "▲", [51, 65, 85], 14);
+                        drawButton(SCROLL_DN.x, SCROLL_DN.y, SCROLL_DN.w, SCROLL_DN.h, "▼", [51, 65, 85], 14);
+                    }
+                    drawButton(BACK_RECT.x, BACK_RECT.y, BACK_RECT.w, BACK_RECT.h, "BACK", [255, 71, 87], 16);
+
+                    p.textStyle(p.NORMAL);
+                    if (gameState === 'ONLINE_LINK') {
+                        drawOverlayBox(180, 200, [34, 211, 238]);
+                        p.fill(255);
+                        p.textAlign(p.CENTER, p.CENTER);
+                        p.textSize(20);
+                        p.text("🌐 상대와 연결 중...", SOLO_W / 2, 220);
+                        p.textSize(13);
+                        p.fill(203, 213, 225);
+                        p.text(net.link === 'open' ? "대전을 준비하고 있어요" : "직접 연결을 만드는 중이에요", SOLO_W / 2, 252);
+                        drawButton(CANCEL_RECT.x, CANCEL_RECT.y, CANCEL_RECT.w, CANCEL_RECT.h, "취소", [71, 85, 105], 16);
+                    } else if (net.incoming) {
+                        const nm = labelOf(net.incoming.from);
+                        const left = Math.max(0, Math.ceil((INVITE_TIMEOUT - (Date.now() - net.incoming.t0)) / 1000));
+                        drawOverlayBox(170, 230, [250, 204, 21]);
+                        p.textAlign(p.CENTER, p.CENTER);
+                        p.fill(250, 204, 21);
+                        p.textSize(18);
+                        p.text("📩 대전 초대가 왔어요!", SOLO_W / 2, 210);
+                        p.fill(255);
+                        p.textSize(15);
+                        p.text(nm + "님이 1:1 대결을 신청했어요", SOLO_W / 2, 240);
+                        p.fill(148, 163, 184);
+                        p.textSize(12);
+                        p.text(left + "초 안에 응답해 주세요", SOLO_W / 2, 264);
+                        drawButton(ACCEPT_RECT.x, ACCEPT_RECT.y, ACCEPT_RECT.w, ACCEPT_RECT.h, "수락", [34, 197, 94]);
+                        drawButton(DECLINE_RECT.x, DECLINE_RECT.y, DECLINE_RECT.w, DECLINE_RECT.h, "거절", [239, 68, 68]);
+                    } else if (net.inviting) {
+                        const nm = labelOf(net.inviting.to);
+                        const left = Math.max(0, Math.ceil((INVITE_TIMEOUT - (Date.now() - net.inviting.t0)) / 1000));
+                        drawOverlayBox(180, 200, [34, 211, 238]);
+                        p.fill(255);
+                        p.textAlign(p.CENTER, p.CENTER);
+                        p.textSize(18);
+                        p.text(nm + "님에게 초대를 보냈어요", SOLO_W / 2, 220);
+                        p.fill(203, 213, 225);
+                        p.textSize(14);
+                        p.text("응답을 기다리는 중... " + left + "초", SOLO_W / 2, 252);
+                        drawButton(CANCEL_RECT.x, CANCEL_RECT.y, CANCEL_RECT.w, CANCEL_RECT.h, "초대 취소", [71, 85, 105], 16);
+                    }
+                }
+
+                function drawToast() {
+                    if (!net.toast) return;
+                    p.noStroke();
+                    p.fill(0, 220);
+                    p.rect(60, 60, 330, 30, 15);
+                    p.fill(253, 230, 138);
+                    p.textStyle(p.NORMAL);
+                    p.textSize(13);
+                    p.textAlign(p.CENTER, p.CENTER);
+                    p.text(net.toast.msg, SOLO_W / 2, 75);
+                }
+
+                // =====================================================
+                // 입력
+                // =====================================================
+                function playerTap() {
+                    if (gameState === 'SOLO') {
+                        jump(solo);
+                    } else if (gameState === 'MATCH' && me && Date.now() >= match.startAt) {
+                        if (jump(me)) sendSnapshot(Date.now(), true);   // 점프 즉시 상대에게 전달
+                    }
+                }
+
+                function handleOnlineClick(mx, my) {
+                    if (gameState === 'ONLINE_LINK') {
+                        if (inRect(mx, my, CANCEL_RECT)) failLink(null);
+                        return;
+                    }
+                    if (net.incoming) {
+                        if (inRect(mx, my, ACCEPT_RECT)) acceptIncoming();
+                        else if (inRect(mx, my, DECLINE_RECT)) declineIncoming();
+                        return;
+                    }
+                    if (net.inviting) {
+                        if (inRect(mx, my, CANCEL_RECT)) cancelInvite(null);
+                        return;
+                    }
+                    if (inRect(mx, my, BACK_RECT)) { leaveOnlineList(); return; }
+
+                    const rows = onlineRows();
+                    if (rows.length > ROWS_VIS) {
+                        if (inRect(mx, my, SCROLL_UP)) { net.scroll = Math.max(0, net.scroll - 1); return; }
+                        if (inRect(mx, my, SCROLL_DN)) { net.scroll = Math.min(rows.length - ROWS_VIS, net.scroll + 1); return; }
+                    }
+                    rows.slice(net.scroll, net.scroll + ROWS_VIS).forEach((r, i) => {
+                        if (inRect(mx, my, invBtnRect(i)) && canInvite(r)) sendInvite(r.id);
+                    });
+                }
+
+                function handleClick(px, py) {
+                    const mx = px / L.k, my = py / L.k;     // 화면 좌표 → 논리 좌표
+                    switch (gameState) {
+                        case 'START':
+                            if (inRect(mx, my, START_SOLO_BTN)) startSolo();
+                            else if (inRect(mx, my, START_ONLINE_BTN)) enterOnlineList();
+                            break;
+                        case 'SOLO':
+                            if (solo.state === 'PLAY') jump(solo);
+                            else if (inRect(mx, my, SOLO_RETRY_BTN)) startSolo();
+                            else if (inRect(mx, my, SOLO_MENU_BTN)) gameState = 'START';
+                            break;
+                        case 'ONLINE_LIST':
+                        case 'ONLINE_LINK':
+                            handleOnlineClick(mx, my);
+                            break;
+                        case 'MATCH':
+                            playerTap();
+                            break;
+                        case 'MATCH_OVER':
+                            if (inRect(mx, my, RESULT_BTN)) leaveMatch();
+                            break;
+                    }
+                }
+
+                // =====================================================
+                // 메인 월드 메시지 수신
+                // =====================================================
+                window.addEventListener('message', (e) => {
+                    if (e.source !== window.parent) return;
+                    const d = e.data;
+                    if (!d || typeof d.type !== 'string') return;
+                    if (d.type === 'SYNC_PLAYERS') {
+                        if (d.players && typeof d.players === 'object') net.remotePlayers = d.players;
+                        if (typeof d.myId === 'string') net.myId = d.myId;
+                    } else if (d.type === 'SC_LINK') {
+                        onLinkEvent(d.state);
+                    } else if (d.type === 'SC_DATA') {
+                        onNetData(d.data);
+                    }
+                });
+
+                // =====================================================
+                // p5 라이프사이클
+                // =====================================================
+                p.setup = () => {
+                    document.body.style.paddingTop = (inFrame() ? TOP_HIDDEN : 0) + 'px';
+                    const canvas = p.createCanvas(SOLO_W, SOLO_H);
+                    canvas.parent('game-container');
+                };
+
+                p.draw = () => {
+                    const dt = Math.min(p.deltaTime / (1000 / 60), 2);   // 60fps 한 프레임 = 1
+                    bgHue = (bgHue + 0.1 * dt) % 360;
+                    syncLayout();
+                    linkTick();
+
+                    if (gameState === 'SOLO') updateSolo(dt);
+                    else if (gameState === 'MATCH' || gameState === 'MATCH_OVER') updateMatch(dt);
+
+                    const bg = hsv(bgHue, 0.15, 0.95);
+                    p.background(bg[0], bg[1], bg[2]);
+
+                    p.push();
+                    p.scale(L.k);
+                    p.textStyle(p.NORMAL);
+                    if (gameState === 'SOLO') drawSolo();
+                    else if (gameState === 'START') drawStartScreen();
+                    else if (gameState === 'ONLINE_LIST' || gameState === 'ONLINE_LINK') drawOnlineScreen();
+                    else if ((gameState === 'MATCH' || gameState === 'MATCH_OVER') && me && opp) drawMatch();
+                    if (gameState !== 'MATCH' && gameState !== 'MATCH_OVER') drawToast();
+                    p.pop();
+                };
+
+                p.mousePressed = () => {
+                    handleClick(p.mouseX, p.mouseY);
+                    return false;
+                };
+
+                // 터치는 바로 처리하고 브라우저의 중복 마우스 이벤트는 막음 (모바일 반응 속도 개선)
+                p.touchStarted = () => {
+                    handleClick(p.mouseX, p.mouseY);
+                    return false;
+                };
+
+                p.keyPressed = () => {
+                    if (p.key === ' ') {
+                        playerTap();
+                        return false;
+                    }
+                };
+            }
+
+            function start(containerId) {
+                destroy();
+                instance = new p5(sketch, containerId);
+            }
+            function pause() { if (instance) instance.noLoop(); }
+            function resume() { if (instance) instance.loop(); }
+            function destroy() { if (instance) { instance.remove(); instance = null; } }
+
+            return { start, pause, resume, destroy };
+        })();
+
+        PerfectStackGame.start('game-container');
+    </script>
+</body>
+</html>

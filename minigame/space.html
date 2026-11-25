@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>네온 스페이스 슈터 - 매운맛</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.js"></script>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: #0a0a19;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      overflow: hidden;
+    }
+    canvas {
+      display: block;
+      box-shadow: 0 0 30px rgba(0, 255, 255, 0.2);
+      border-radius: 8px;
+    }
+  </style>
+</head>
+<body>
+
+<script>
+let playerX, playerY;
+let playerSize = 35; 
+let bullets = [];
+let enemies = [];
+let enemyBullets = []; 
+let drops = []; 
+let particles = [];
+let score = 0;
+let coins = 50; 
+let gameOver = false;
+let screenShake = 0;
+
+// 스킨 시스템 (총 10개)
+let skinsUnlocked = [true, false, false, false, false, false, false, false, false, false]; 
+let skinPrices =    [0,    50,    100,   150,   200,   250,   300,   350,   400,   500];
+let skinColors = ['#FFFFFF', '#00FF00', '#0088FF', '#FF00FF', '#FFA500', '#FF2222', '#00FFFF', '#FFFF00', '#FF88CC', '#FFD700'];
+let currentSkin = 0;
+let shopIndex = 0; 
+
+function setup() {
+  createCanvas(600, 600); 
+  resetGame();
+}
+
+function resetGame() {
+  playerX = width / 2;
+  playerY = height - 50;
+  bullets = [];
+  enemies = [];
+  enemyBullets = []; 
+  drops = [];
+  particles = [];
+  score = 0;
+  gameOver = false;
+  screenShake = 0;
+  loop();
+}
+
+function draw() {
+  if (screenShake > 0) {
+    translate(random(-screenShake, screenShake), random(-screenShake, screenShake));
+    screenShake--;
+  }
+
+  background(10, 10, 25, 150); 
+
+  if (!gameOver) {
+    movePlayer();
+    
+    if (mouseIsPressed && frameCount % 8 === 0) {
+      fireWeapon();
+    }
+
+    handleBullets();
+    handleEnemyBullets(); 
+    handleEnemies();
+    handleDrops();
+    handleParticles();
+    drawPlayerShape(playerX, playerY, playerSize, currentSkin);
+
+    drawUI();
+  } else {
+    drawGameOver();
+  }
+}
+
+function movePlayer() {
+  playerX = lerp(playerX, mouseX, 0.2);
+  playerY = lerp(playerY, mouseY, 0.2);
+  
+  playerX = constrain(playerX, playerSize/2, width - playerSize/2);
+  playerY = constrain(playerY, 150, height - playerSize/2);
+}
+
+function fireWeapon() {
+  let c = skinColors[currentSkin];
+  if (currentSkin >= 8) { 
+    bullets.push({x: playerX, y: playerY - 20, vx: 0, vy: -12, c: c});
+    bullets.push({x: playerX - 10, y: playerY - 10, vx: -3, vy: -11, c: c});
+    bullets.push({x: playerX + 10, y: playerY - 10, vx: 3, vy: -11, c: c});
+  } else if (currentSkin >= 4) { 
+    bullets.push({x: playerX - 10, y: playerY - 20, vx: 0, vy: -12, c: c});
+    bullets.push({x: playerX + 10, y: playerY - 20, vx: 0, vy: -12, c: c});
+  } else { 
+    bullets.push({x: playerX, y: playerY - 20, vx: 0, vy: -12, c: c});
+  }
+}
+
+function handleBullets() {
+  for (let i = bullets.length - 1; i >= 0; i--) {
+    let b = bullets[i];
+    b.x += b.vx;
+    b.y += b.vy;
+    
+    noStroke();
+    fill(b.c);
+    circle(b.x, b.y, 8);
+    fill(255);
+    circle(b.x, b.y, 4);
+
+    if (b.y < 0) bullets.splice(i, 1);
+  }
+}
+
+function handleEnemies() {
+  let spawnRate = max(8, 35 - floor(score / 150));
+  if (frameCount % spawnRate === 0) {
+    enemies.push({
+      x: random(30, width - 30), 
+      y: -30, 
+      hp: 1 + floor(score / 400), 
+      speed: random(3, 5) + (score / 800), 
+      size: random(25, 40),
+      offsetX: random(TWO_PI) 
+    });
+  }
+
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    let e = enemies[i];
+    
+    e.y += e.speed;
+    e.x += sin(frameCount * 0.05 + e.offsetX) * 2; 
+    e.x = constrain(e.x, e.size/2, width - e.size/2);
+
+    if (random() < 0.005 + (score / 20000)) {
+       enemyBullets.push({x: e.x, y: e.y + 10, vy: e.speed + 4});
+    }
+
+    noStroke();
+    fill(255, 50, 50, 180);
+    rectMode(CENTER);
+    rect(e.x, e.y, e.size, e.size, 5);
+    fill(255, 100, 100);
+    rect(e.x, e.y, e.size - 10, e.size - 10, 2);
+
+    for (let j = bullets.length - 1; j >= 0; j--) {
+      let b = bullets[j];
+      if (dist(b.x, b.y, e.x, e.y) < e.size / 2 + 4) {
+        e.hp--;
+        bullets.splice(j, 1);
+        createParticles(b.x, b.y, skinColors[currentSkin], 5);
+
+        if (e.hp <= 0) {
+          score += 15;
+          createParticles(e.x, e.y, color(255, 50, 50), 15);
+          if (random() < 0.3) drops.push({x: e.x, y: e.y, speed: 3}); 
+          enemies.splice(i, 1);
+          break; 
+        }
+      }
+    }
+
+    if (e && dist(playerX, playerY, e.x, e.y) < (playerSize / 2 + e.size / 2 - 5)) {
+      triggerGameOver();
+    }
+
+    if (e && e.y > height + 50) enemies.splice(i, 1);
+  }
+}
+
+function handleEnemyBullets() {
+  for (let i = enemyBullets.length - 1; i >= 0; i--) {
+    let eb = enemyBullets[i];
+    eb.y += eb.vy;
+    
+    noStroke();
+    fill(255, 100, 0, 200); 
+    rect(eb.x, eb.y, 6, 15, 3);
+    fill(255);
+    rect(eb.x, eb.y, 2, 8, 1);
+
+    if (dist(playerX, playerY, eb.x, eb.y) < playerSize / 2 - 2) {
+      triggerGameOver();
+    }
+
+    if (eb.y > height + 20) enemyBullets.splice(i, 1);
+  }
+}
+
+function handleDrops() {
+  for (let i = drops.length - 1; i >= 0; i--) {
+    let d = drops[i];
+    d.y += d.speed;
+    
+    fill(255, 215, 0); 
+    circle(d.x, d.y, 15);
+    fill(255);
+    circle(d.x, d.y, 8);
+
+    if (dist(playerX, playerY, d.x, d.y) < playerSize) {
+      coins += 5;
+      score += 5;
+      createParticles(d.x, d.y, color(255, 215, 0), 10);
+      drops.splice(i, 1);
+    } else if (d.y > height + 20) {
+      drops.splice(i, 1);
+    }
+  }
+}
+
+function createParticles(px, py, clr, amount) {
+  for (let i = 0; i < amount; i++) {
+    particles.push({x: px, y: py, vx: random(-4, 4), vy: random(-4, 4), life: 255, c: clr});
+  }
+}
+
+function handleParticles() {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    let p = particles[i];
+    p.x += p.vx;
+    p.y += p.vy;
+    p.life -= 15;
+    fill(color(p.c).levels[0], color(p.c).levels[1], color(p.c).levels[2], p.life);
+    noStroke();
+    circle(p.x, p.y, p.life / 30 + 2);
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+
+function drawPlayerShape(x, y, size, skinIdx) {
+  let c = skinColors[skinIdx];
+  fill(color(c).levels[0], color(c).levels[1], color(c).levels[2], 80);
+  noStroke();
+  circle(x, y + 10, size + sin(frameCount * 0.5) * 5); 
+
+  fill(c);
+  triangle(x, y - size/2, x - size/2, y + size/2, x + size/2, y + size/2);
+  fill(255);
+  triangle(x, y - size/4, x - size/5, y + size/3, x + size/5, y + size/3);
+}
+
+function drawUI() {
+  drawNeonText("SCORE: " + score, 15, 15, color(255), 20, LEFT);
+  drawNeonText("COINS: " + coins + " C", 15, 45, color(255, 215, 0), 20, LEFT);
+
+  drawNeonText("SHOP ( ← / → 탐색 )", width - 15, 15, color(200), 14, RIGHT);
+  
+  let sc = skinColors[shopIndex];
+  drawNeonText("SKIN " + (shopIndex + 1), width - 15, 35, sc, 22, RIGHT);
+
+  if (currentSkin === shopIndex) {
+    drawNeonText("[ EQUIPPED ]", width - 15, 65, color(100, 255, 100), 16, RIGHT);
+  } else if (skinsUnlocked[shopIndex]) {
+    drawNeonText("[ SPACE 장착 ]", width - 15, 65, color(255), 16, RIGHT);
+  } else {
+    drawNeonText("가격: " + skinPrices[shopIndex] + " C", width - 15, 65, color(255, 100, 100), 16, RIGHT);
+    drawNeonText("[ SPACE 구매 ]", width - 15, 85, color(255), 14, RIGHT);
+  }
+}
+
+function drawNeonText(txt, x, y, col, size, alignStr) {
+  fill(col);
+  textSize(size);
+  textStyle(BOLD);
+  textAlign(alignStr, TOP);
+  text(txt, x, y);
+}
+
+function keyPressed() {
+  if (keyCode === LEFT_ARROW) {
+    shopIndex = (shopIndex - 1 + 10) % 10;
+  } else if (keyCode === RIGHT_ARROW) {
+    shopIndex = (shopIndex + 1) % 10;
+  } else if (key === ' ' || keyCode === 32) {
+    if (skinsUnlocked[shopIndex]) {
+      currentSkin = shopIndex;
+    } else {
+      if (coins >= skinPrices[shopIndex]) {
+        coins -= skinPrices[shopIndex]; 
+        skinsUnlocked[shopIndex] = true; 
+        currentSkin = shopIndex; 
+        createParticles(width - 50, 50, color(255, 215, 0), 30); 
+      } else {
+        screenShake = 10; 
+      }
+    }
+  }
+}
+
+function triggerGameOver() {
+  gameOver = true;
+  screenShake = 40;
+  createParticles(playerX, playerY, color(0, 255, 255), 40);
+}
+
+function drawGameOver() {
+  fill(255, 50, 50);
+  textSize(45);
+  textAlign(CENTER, CENTER);
+  text("GAME OVER", width / 2, height / 2 - 20);
+  textSize(20);
+  fill(255);
+  text("클릭하여 재시작", width / 2, height / 2 + 30);
+}
+
+function mousePressed() {
+  if (gameOver) resetGame();
+}
+</script>
+
+</body>
+</html>

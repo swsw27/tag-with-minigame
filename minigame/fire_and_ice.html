@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Fire and Ice - 리듬 게임</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.6.0/p5.min.js"></script>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: #0f0f19;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      overflow: hidden;
+      font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif;
+    }
+    canvas {
+      display: block;
+      box-shadow: 0 0 30px rgba(0, 0, 0, 0.7);
+    }
+  </style>
+</head>
+<body>
+
+<script>
+let balls = [];
+let pivotIdx = 0; 
+let angle = 0;
+let speed = 0.075; 
+
+let tileW = 100;
+let tileH = 65;       
+let tileGap = tileW;   
+let radius = tileGap;  
+
+let tiles = []; 
+let currentTileIdx = 0;
+let totalTileCount = 50; 
+
+let camX = 0, camY = 0; 
+let lerpSpeed = 0.15; 
+
+let feedbackText = "";
+let feedbackColor = [255, 255, 255];
+let feedbackTimer = 0;
+let feedbackX = 0;
+let feedbackY = 0;
+let gameState = "MAIN_LOBBY"; 
+let particles = [];
+let flashAlpha = 0;
+let gameStartedRunning = false;
+let stats = { perfect: 0, ePerfect: 0, lPerfect: 0, early: 0, late: 0 };
+let mapButtons = [
+  { label: "1단계: 튜토리얼 산책길 (초보)", type: "STAGE_1", spd: 0.06 },
+  { label: "2단계: 잔잔한 시냇물 (기본)", type: "STAGE_2", spd: 0.08 },
+  { label: "3단계: 가속도 주의보 (중수)", type: "STAGE_3", spd: 0.10 },
+  { label: "4단계: 불꽃의 왈츠 (빠름)", type: "STAGE_4", spd: 0.12 },
+  { label: "5단계: 얼음 송곳니 (매우 빠름)", type: "STAGE_5", spd: 0.14 },
+  { label: "6단계: 고속도로 질주 ( 고수 )", type: "STAGE_6", spd: 0.16 },
+  { label: "7단계: 폭풍우의 중심 ( 초고수 )", type: "STAGE_7", spd: 0.18 },
+  { label: "8단계: 음속의 벽 파괴 ( 한계 )", type: "STAGE_8", spd: 0.20 },
+  { label: "9단계: 광속의 비트 ( 지옥 )", type: "STAGE_9", spd: 0.23 },
+  { label: "10단계: 신의 영역 ( 클리어 불가 )", type: "STAGE_10", spd: 0.26 }
+];
+let scrollY = 0;
+
+function setup() {
+  createCanvas(800, 600);
+  resetGameData(mapButtons[0]); 
+}
+
+function resetGameData(stageConfig) {
+  balls = [
+    { x: 200, y: height / 2, color: [255, 50, 50] }, // 불의 공 (빨강)
+    { x: 200, y: height / 2, color: [50, 150, 255] } // 얼음의 공 (파랑)
+  ];
+  pivotIdx = 0;
+  angle = 0;
+  speed = stageConfig.spd;
+  currentTileIdx = 0;
+  gameStartedRunning = false;
+  flashAlpha = 0;
+  particles = [];
+  feedbackTimer = 0;
+  
+  stats = { perfect: 0, ePerfect: 0, lPerfect: 0, early: 0, late: 0 };
+  createMap();
+}
+
+function draw() {
+  background(15, 15, 25);
+  if (gameState === "MAIN_LOBBY") drawMainLobby();
+  else if (gameState === "MAP_SELECT") drawMapSelect();
+  else if (gameState === "PLAYING") drawGame();
+  else if (gameState === "GAMEOVER") drawGameOver();
+  else if (gameState === "CLEAR") drawClearScreen();
+}
+
+// 🛠️ [트랙 알고리즘 전면 개편] 꼬불형, ㄹ자, ㄲ자 자동 생성기
+function createMap() {
+  tiles = [];
+  let curX = 200, curY = height / 2;
+  
+  // 첫 타일 배치 (오른쪽 진행 방향, 각도 0)
+  tiles.push({ x: curX, y: curY, targetAngle: 0 });
+  let currentDir = "RIGHT"; // 현재 타일이 뻗어 나가는 방향 추적
+  
+  for (let i = 1; i <= totalTileCount; i++) {
+    // 구간별 패턴 분기 (총 50칸)
+    if (i <= 10) {
+      // 1. 초반 구간: 손풀기용 일직선 (ㄲ자 진입 전)
+      currentDir = "RIGHT";
+    } 
+    else if (i > 10 && i <= 22) {
+      // 2. 중초반 구간: 주기적으로 위아래로 요동치는 '꼬불꼬불 S자' 패턴
+      if (i % 4 === 0) currentDir = "UP";
+      else if (i % 4 === 2) currentDir = "DOWN";
+      else currentDir = "RIGHT";
+    } 
+    else if (i > 22 && i <= 36) {
+      // 3. 중반 구간: 화끈하게 감겨서 돌아가는 'ㄹ' 자 지그재그 패턴
+      if (i === 23 || i === 24) currentDir = "UP";
+      else if (i > 24 && i <= 29) currentDir = "LEFT"; // 원작 특유의 역주행 코스!
+      else if (i === 30 || i === 31) currentDir = "UP";
+      else currentDir = "RIGHT";
+    } 
+    else {
+      // 4. 후반 구간: 직각으로 과감하게 꺾이는 'ㄲ' 자 계단식 크랭크 패턴
+      if (i % 5 === 0 || i % 5 === 1) currentDir = "DOWN";
+      else currentDir = "RIGHT";
+    }
+
+    // 결정된 방향 좌표와 조준해야 할 절대적 각도(targetAngle) 세팅
+    let nextAngle = 0;
+    if (currentDir === "RIGHT") { curX += tileGap; nextAngle = 0; }
+    else if (currentDir === "UP") { curY -= tileGap; nextAngle = -HALF_PI; }
+    else if (currentDir === "DOWN") { curY += tileGap; nextAngle = HALF_PI; }
+    else if (currentDir === "LEFT") { curX -= tileGap; nextAngle = PI; }
+
+    tiles.push({ x: curX, y: curY, targetAngle: nextAngle });
+  }
+}
+
+function drawGame() {
+  let targetX = width / 2 - balls[pivotIdx].x;
+  let targetY = height / 2 - balls[pivotIdx].y;
+  camX = lerp(camX, targetX, lerpSpeed); 
+  camY = lerp(camY, targetY, lerpSpeed); 
+
+  push();
+  translate(camX, camY); 
+  drawTiles();
+
+  let rotatingIdx = 1 - pivotIdx;
+  angle += speed; 
+
+  balls[rotatingIdx].x = balls[pivotIdx].x + cos(angle) * radius;
+  balls[rotatingIdx].y = balls[pivotIdx].y + sin(angle) * radius;
+
+  noFill();
+  stroke(255, 50, 50, 40);
+  strokeWeight(1.5);
+  drawingContext.setLineDash([4, 4]); 
+  ellipse(balls[pivotIdx].x, balls[pivotIdx].y, radius * 2);
+  drawingContext.setLineDash([]);
+  
+  if (gameState === "PLAYING") {
+    for (let i = 0; i < 3; i++) {
+      particles.push(new Particle(balls[rotatingIdx].x, balls[rotatingIdx].y, balls[rotatingIdx].color));
+    }
+  }
+
+  for (let i = particles.length - 1; i >= 0; i--) {
+    particles[i].update();
+    particles[i].display();
+    if (particles[i].isDead()) {
+      particles.splice(i, 1);
+    }
+  }
+
+  stroke(255, 180);
+  strokeWeight(2);
+  fill(balls[0].color);
+  ellipse(balls[0].x, balls[0].y, 34); 
+  fill(balls[1].color); 
+  ellipse(balls[1].x, balls[1].y, 34);
+  
+  drawFeedbackWorld();
+  pop();
+  
+  drawLiveStatsUI();
+  
+  if (flashAlpha > 0) {
+    if (gameState === "CLEAR") fill(255, flashAlpha);
+    else fill(255, 0, 0, flashAlpha);
+    rectMode(CORNER);
+    rect(0, 0, width, height);
+    flashAlpha -= 10;
+  }
+}
+
+function drawLiveStatsUI() {
+  push();
+  rectMode(CORNER);
+  fill(0, 0, 0, 160); stroke(255, 40); strokeWeight(1);
+  rect(15, 15, 170, 145, 8);
+  noStroke(); textAlign(LEFT, TOP); textSize(15); textStyle(BOLD);
+  let uiX = 25, uiY = 25, gap = 23;
+  fill(100, 255, 100); text("Perfect: " + stats.perfect, uiX, uiY);
+  fill(150, 255, 150); text("E-Perfect: " + stats.ePerfect, uiX, uiY + gap);
+  fill(150, 255, 150); text("L-Perfect: " + stats.lPerfect, uiX, uiY + gap * 2);
+  fill(255, 150, 0); text("Early!: " + stats.early, uiX, uiY + gap * 3);
+  fill(255, 150, 0); text("Late!: " + stats.late, uiX, uiY + gap * 4);
+  pop();
+}
+
+function checkHit() {
+  let rotatingIdx = 1 - pivotIdx;
+  let targetTileIdx = currentTileIdx + 1;
+  if (targetTileIdx >= tiles.length) return;
+
+  let nextTile = tiles[targetTileIdx];
+  
+  // 현재 각도와 타일 고유 타겟 각도의 편차 계산
+  let diff = angle - nextTile.targetAngle;
+  while (diff < -PI) diff += TWO_PI;
+  while (diff > PI) diff -= TWO_PI;
+  
+  let diffDeg = degrees(diff);
+  // 진행 방향(공 회전 방향 부호)에 따른 판정 반전 보정
+  if (speed < 0) {
+    diffDeg = -diffDeg;
+  }
+
+  feedbackX = balls[rotatingIdx].x;
+  feedbackY = balls[rotatingIdx].y - 35;
+  
+  if (diffDeg < -85) {
+    if (gameStartedRunning) triggerGameOver("Early!!", [255, 70, 70]);
+    else setFeedback("Early!!", [255, 70, 70]);
+  } 
+  else if (diffDeg >= -85 && diffDeg <= 85) {
+    if (diffDeg < -55) { setFeedback("Early!", [255, 150, 0]); stats.early++; }
+    else if (diffDeg < -25) { setFeedback("E-Perfect!", [150, 255, 150]); stats.ePerfect++; }
+    else if (diffDeg <= 25) { setFeedback("Perfect!", [100, 255, 100]); stats.perfect++; } 
+    else if (diffDeg <= 55) { setFeedback("L-Perfect!", [150, 255, 150]); stats.lPerfect++; }
+    else { setFeedback("Late!", [255, 150, 0]); stats.late++; }
+    
+    gameStartedRunning = true;
+    landBall(rotatingIdx, nextTile);
+    if (currentTileIdx >= totalTileCount) {
+      triggerStageClear();
+    }
+  } 
+  else {
+    if (gameStartedRunning) triggerGameOver("Late!!", [255, 0, 0]);
+  }
+}
+
+function triggerGameOver(msg, clr) {
+  let rotatingIdx = 1 - pivotIdx;
+  feedbackX = balls[rotatingIdx].x;
+  feedbackY = balls[rotatingIdx].y - 35;
+  setFeedback(msg, clr);
+  flashAlpha = 220; 
+  gameState = "GAMEOVER";
+}
+
+function triggerStageClear() {
+  flashAlpha = 255; 
+  gameState = "CLEAR";
+}
+
+function drawTiles() {
+  rectMode(CENTER); noStroke();
+  for (let i = 0; i < tiles.length; i++) {
+    let t = tiles[i];
+    if (i === totalTileCount) {
+      fill(255, 215, 0);
+    } else if (i === currentTileIdx + 1) {
+      fill(245, 245, 210);
+    } else {
+      fill(i <= currentTileIdx ? 130 : 225);
+    }
+    
+    // 🛠️ 꺾이는 맵 구조상 타일 모양이 어우러지도록 정사각형에 가깝게 리사이징 변경 (100x65 -> 82x82)
+    rect(t.x, t.y, 82, 82, 6);
+  }
+}
+
+class Particle {
+  constructor(x, y, col) {
+    this.x = x; this.y = y;
+    this.vx = random(-1.5, 1.5); 
+    this.vy = random(-1.5, 1.5);
+    this.alpha = 200; 
+    this.color = col; 
+    this.size = random(8, 14);
+  }
+  update() { 
+    this.x += this.vx; 
+    this.y += this.vy; 
+    this.alpha -= 10;     
+    this.size *= 0.92;
+  }
+  display() {
+    noStroke(); 
+    fill(this.color[0], this.color[1], this.color[2], this.alpha);
+    ellipse(this.x, this.y, this.size);
+  }
+  isDead() { return this.alpha <= 0 || this.size < 0.5; }
+}
+
+function keyPressed() {
+  if (gameState === "PLAYING") checkHit();
+  else if ((gameState === "GAMEOVER" || gameState === "CLEAR") && (key === 'r' || key === 'R')) {
+    gameState = "MAIN_LOBBY";
+  }
+}
+
+// 스페이스바나 엔터 키 등으로도 판정 가능하도록 추가 (모바일/PC 편의성)
+function mousePressed() {
+  if (gameState === "PLAYING") {
+    checkHit();
+  }
+}
+
+function mouseWheel(event) {
+  if (gameState === "MAP_SELECT") {
+    scrollY -= event.delta * 0.5;
+    scrollY = constrain(scrollY, -450, 0);
+  }
+}
+
+function landBall(idx, tile) {
+  balls[idx].x = tile.x;
+  balls[idx].y = tile.y;
+  
+  pivotIdx = idx; 
+  currentTileIdx++;
+  speed = -speed; 
+  
+  // 🛠️ 핵심 보정: 꺾인 트랙 패턴 기조에 맞춰 다음 목표 진입 각도 동적 갱신
+  let nextTile = tiles[currentTileIdx + 1];
+  if (nextTile) {
+    angle = nextTile.targetAngle + PI;
+  }
+}
+
+function setFeedback(txt, clr) { 
+  feedbackText = txt;
+  feedbackColor = clr; 
+  feedbackTimer = 35; 
+}
+
+function drawFeedbackWorld() {
+  if (feedbackTimer > 0) {
+    push();
+    textAlign(CENTER, CENTER); textStyle(BOLD); textSize(24);
+    fill(0, feedbackTimer * 6); text(feedbackText, feedbackX + 2, feedbackY + 2);
+    fill(feedbackColor[0], feedbackColor[1], feedbackColor[2], feedbackTimer * 8);
+    text(feedbackText, feedbackX, feedbackY);
+    pop();
+    feedbackTimer--;
+  }
+}
+
+function drawMainLobby() {
+  textAlign(CENTER, CENTER); fill(255); textSize(50); textStyle(BOLD);
+  text("FIRE AND ICE", width / 2, height / 2 - 80);
+  if (drawMenuButton("MAP SELECT", width / 2, height / 2 + 50, 260, 70) && mouseIsPressed) {
+    gameState = "MAP_SELECT";
+    mouseIsPressed = false;
+    scrollY = 0; 
+  }
+}
+
+function drawMapSelect() {
+  textAlign(CENTER, CENTER); fill(255); textSize(30); textStyle(BOLD);
+  text("SELECT STAGE (Scroll Wheel)", width / 2, 45);
+  
+  push();
+  translate(0, scrollY);
+  for (let i = 0; i < mapButtons.length; i++) {
+    let btnY = 130 + (i * 75);
+    if (drawMenuButton(mapButtons[i].label, width / 2, btnY, 420, 52) && mouseIsPressed) {
+      resetGameData(mapButtons[i]); 
+      gameState = "PLAYING";
+      mouseIsPressed = false;
+    }
+  }
+  pop();
+
+  if (drawMenuButton("BACK", width / 2, 550, 120, 40) && mouseIsPressed) {
+    gameState = "MAIN_LOBBY";
+    mouseIsPressed = false;
+  }
+}
+
+function drawMenuButton(txt, x, y, w, h) {
+  let actualY = (gameState === "MAP_SELECT" && txt !== "BACK") ? y + scrollY : y;
+  let hovering = mouseX > x - w/2 && mouseX < x + w/2 && mouseY > actualY - h/2 && mouseY < actualY + h/2;
+  rectMode(CENTER); strokeWeight(3); stroke(hovering ? [0, 255, 255] : 255);
+  fill(hovering ? 50 : 0); rect(x, y, w, h, 12);
+  noStroke();
+  fill(255); textStyle(NORMAL); textSize(16); text(txt, x, y);
+  if (hovering) cursor(HAND); else cursor(ARROW);
+  return hovering;
+}
+
+function drawGameOver() {
+  background(40, 0, 0, 200);
+  fill(255); textAlign(CENTER, CENTER); textStyle(BOLD);
+  textSize(50);
+  text("GAME OVER", width / 2, height / 2 - 20);
+  textSize(20); textStyle(NORMAL);
+  text("Press 'R' to Return to Lobby", width / 2, height / 2 + 40);
+}
+
+function drawClearScreen() {
+  background(10, 35, 15, 220); 
+  textAlign(CENTER, CENTER);
+  
+  fill(100, 255, 100); textStyle(BOLD); textSize(55);
+  text("STAGE CLEAR!!", width / 2, height / 2 - 120);
+  
+  fill(255); textSize(20); textStyle(NORMAL);
+  text("🎉 축하합니다! 완벽하게 트랙을 완주했습니다. 🎉", width / 2, height / 2 - 50);
+  
+  rectMode(CENTER); fill(0, 100); stroke(255, 30);
+  rect(width / 2, height / 2 + 60, 340, 150, 10);
+  
+  noStroke(); textAlign(LEFT, CENTER); textSize(16); fill(255);
+  let resX = width / 2 - 140;
+  let resY = height / 2 + 15;
+  text("Perfect: " + stats.perfect, resX, resY);
+  text("E-Perfect: " + stats.ePerfect, resX, resY + 25);
+  text("L-Perfect: " + stats.lPerfect, resX, resY + 50);
+  text("Early / Late: " + stats.early + " / " + stats.late, resX, resY + 75);
+  
+  textAlign(CENTER, CENTER); fill(180); textSize(15);
+  text("Press 'R' to Return to Lobby", width / 2, height / 2 + 170);
+}
+</script>
+
+</body>
+</html>

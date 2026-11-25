@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>10초 서바이벌 네온 회피 게임</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.6.0/p5.min.js"></script>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: #0a0c16;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      overflow: hidden;
+      font-family: 'Helvetica', sans-serif;
+    }
+    canvas {
+      display: block;
+    }
+  </style>
+</head>
+<body>
+
+<script>
+let player;
+let enemies = [];
+let particles = [];
+let score = 0;
+let highScore = 0;
+let shakeAmount = 0;
+let gameOver = false;
+let gameStarted = false; 
+let gameWon = false; // 승리 상태 체크 변수
+const TIME_LIMIT = 10; // 목표 제한 시간 (10초)
+
+function setup() {
+  createCanvas(windowWidth, windowHeight);
+  player = createVector(width / 2, height / 2);
+}
+
+function draw() {
+  // 1. 화면 잔상 효과 (모션 블러)
+  background(10, 12, 22, 40); 
+  
+  // 2. 화면 흔들림 효과 (카메라 셰이크)
+  if (shakeAmount > 0) {
+    translate(random(-shakeAmount, shakeAmount), random(-shakeAmount, shakeAmount));
+    shakeAmount *= 0.9;
+  }
+
+  // 브라우저 첫 로드 시 mouseX, mouseY가 0인 상태에서 자동 시작되는 버그 방지
+  if (!gameStarted && !gameOver && !gameWon) {
+    if (pmouseX !== 0 || pmouseY !== 0) {
+      gameStarted = true;
+    }
+  }
+
+  // 게임 진행 중일 때 (게임오버가 아니고, 승리하지 않았고, 시작되었을 때)
+  if (!gameOver && !gameWon && gameStarted) {
+    // 플레이어 부드러운 마우스 추적
+    player.x = lerp(player.x, mouseX, 0.15);
+    player.y = lerp(player.y, mouseY, 0.15);
+    
+    // 플레이어 그리기 (네온 사이언 블루)
+    drawGlowCircle(player.x, player.y, 25, color(0, 255, 255));
+    
+    // 시간 경과에 따라 적 생성 속도 증가
+    let spawnRate = Math.max(2, 10 - Math.floor(score / 2)); 
+    if (frameCount % spawnRate === 0) {
+      spawnEnemy();
+    }
+    
+    // 스코어를 '버틴 시간(초)' 개념으로 환산 (60fps 기준 실시간 증가 보정)
+    score += 1 / 60; 
+
+    // 10초 버티면 승리 처리
+    if (score >= TIME_LIMIT) {
+      triggerGameWin();
+    }
+  } else if (!gameStarted && !gameWon) {
+    // 게임 시작 전 플레이어 초기 위치 표시
+    drawGlowCircle(player.x, player.y, 25, color(0, 255, 255));
+  }
+
+  // 3. 적 오브젝트 루프
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    let e = enemies[i];
+    
+    // 게임 오버나 승리 시에는 적들이 멈추지 않고 화면 밖으로 날아가도록 유도
+    e.pos.add(e.vel);
+    
+    // 적 그리기 (네온 핑크)
+    drawGlowCircle(e.pos.x, e.pos.y, e.size, color(255, 50, 100));
+    
+    // 화면 밖으로 이탈 시 삭제
+    if (e.pos.x < -50 || e.pos.x > width + 50 || e.pos.y < -50 || e.pos.y > height + 50) {
+      enemies.splice(i, 1);
+      continue;
+    }
+    
+    // 플레이어와 적 충돌 물리 판정
+    if (!gameOver && !gameWon && gameStarted) {
+      let d = dist(player.x, player.y, e.pos.x, e.pos.y);
+      if (d < 10 + e.size / 2) {
+        triggerGameOver();
+      }
+    }
+  }
+
+  // 4. 이펙트 파티클 처리
+  for (let i = particles.length - 1; i >= 0; i--) {
+    let p = particles[i];
+    p.pos.add(p.vel);
+    p.alpha -= 5;
+    
+    let c = p.color;
+    fill(red(c), green(c), blue(c), p.alpha);
+    noStroke();
+    ellipse(p.pos.x, p.pos.y, p.size);
+    
+    if (p.alpha <= 0) {
+      particles.splice(i, 1);
+    }
+  }
+
+  // 5. UI 레이아웃 렌더링
+  drawUI();
+}
+
+// 네온 광원 렌더링 함수
+function drawGlowCircle(x, y, size, col) {
+  push();
+  noStroke();
+  let r = red(col);
+  let g = green(col);
+  let b = blue(col);
+  
+  for (let i = 3; i > 0; i--) {
+    fill(r, g, b, 40 / i);
+    ellipse(x, y, size + (i * 8));
+  }
+  fill(255); 
+  ellipse(x, y, size);
+  pop();
+}
+
+// 적 스폰 알고리즘
+function spawnEnemy() {
+  let side = Math.floor(random(4));
+  let x, y;
+  
+  if (side === 0) { x = random(width); y = -20; }
+  else if (side === 1) { x = width + 20; y = random(height); }
+  else if (side === 2) { x = random(width); y = height + 20; }
+  else { x = -20; y = random(height); }
+
+  let target = createVector(player.x + random(-50, 50), player.y + random(-50, 50));
+  let vel = p5.Vector.sub(target, createVector(x, y)).normalize().mult(random(5, 11));
+
+  enemies.push({ pos: createVector(x, y), vel: vel, size: random(12, 28) });
+}
+
+// 게임 오버 연출
+function triggerGameOver() {
+  gameOver = true;
+  shakeAmount = 25;
+  
+  // 파티클 폭발 연출 (네온 핑크)
+  for (let i = 0; i < 50; i++) {
+    particles.push({
+      pos: createVector(player.x, player.y),
+      vel: p5.Vector.random2D().mult(random(3, 12)),
+      color: color(255, 50, 100),
+      size: random(4, 10),
+      alpha: 255
+    });
+  }
+}
+
+// 게임 승리 연출 함수
+function triggerGameWin() {
+  gameWon = true;
+  score = TIME_LIMIT; // 스코어를 정확히 10초로 고정
+  highScore = TIME_LIMIT;
+  shakeAmount = 10;
+  
+  // 승리 축하 폭발 파티클 연출 (골드/사이언 컬러 혼합)
+  for (let i = 0; i < 80; i++) {
+    particles.push({
+      pos: createVector(player.x, player.y),
+      vel: p5.Vector.random2D().mult(random(2, 15)),
+      color: random([color(255, 215, 0), color(0, 255, 255)]),
+      size: random(3, 8),
+      alpha: 255
+    });
+  }
+}
+
+// UI 렌더링
+function drawUI() {
+  push();
+  textFont('Helvetica');
+  
+  // 상단 실시간 시간 인터페이스
+  textAlign(LEFT, TOP);
+  textSize(14);
+  fill(255, 180);
+  text("TIME ELAPSED", 30, 25);
+  
+  textSize(36);
+  fill(0, 255, 255);
+  // 소수점 첫째 짜리까지 표기하여 긴박감 조성 (예: 4.2s / 10.0s)
+  text(nf(score, 1, 1) + "s / " + TIME_LIMIT + ".0s", 30, 45);
+
+  // 시작 화면 타이틀 표시
+  if (!gameStarted && !gameOver && !gameWon) {
+    textAlign(CENTER, CENTER);
+    textSize(38);
+    fill(0, 255, 255);
+    text("10초 버티면 감격스러운 게임", width / 2, height / 2 - 60);
+    
+    textSize(16);
+    fill(255, 150);
+    text("MOVE MOUSE TO START", width / 2, height / 2 + 60);
+  }
+
+  // 게임 오버 오버레이 화면
+  if (gameOver) {
+    background(5, 7, 15, 200);
+    textAlign(CENTER, CENTER);
+    
+    textSize(48);
+    fill(255, 50, 100);
+    text("SYSTEM FAILURE", width / 2, height / 2 - 30);
+    
+    textSize(18);
+    fill(255, 220);
+    text("SURVIVED: " + nf(score, 1, 1) + "s  |  BEST: " + nf(highScore, 1, 1) + "s", width / 2, height / 2 + 25);
+    
+    textSize(14);
+    fill(255, 130);
+    text("CLICK ANYWHERE TO REBOOT", width / 2, height / 2 + 75);
+  }
+
+  // 게임 승리 오버레이 화면
+  if (gameWon) {
+    background(5, 15, 10, 210); // 약간 푸른빛/녹색빛이 도는 다크 배경
+    textAlign(CENTER, CENTER);
+    
+    textSize(48);
+    fill(255, 215, 0); // 골드 컬러 타이틀
+    text("MISSION ACCOMPLISHED", width / 2, height / 2 - 30);
+    
+    textSize(18);
+    fill(255, 255);
+    text("🎉 감격스럽게도 10초 생존에 성공했습니다! 🎉", width / 2, height / 2 + 25);
+    
+    textSize(14);
+    fill(0, 255, 255);
+    text("CLICK ANYWHERE TO PLAY AGAIN", width / 2, height / 2 + 85);
+  }
+  pop();
+}
+
+// 마우스 클릭 시 재시작 시스템
+function mousePressed() {
+  if (gameOver || gameWon) {
+    gameOver = false;
+    gameWon = false;
+    gameStarted = false; 
+    enemies = [];
+    particles = [];
+    score = 0;
+    
+    // 재시작 시 플레이어 위치를 마우스 위치로 즉시 초기화하여 부자연스러운 팅김 방지
+    player.set(mouseX === 0 ? width / 2 : mouseX, mouseY === 0 ? height / 2 : mouseY);
+  }
+}
+
+function windowResized() {
+  resizeCanvas(windowWidth, windowHeight);
+}
+</script>
+
+</body>
+</html>

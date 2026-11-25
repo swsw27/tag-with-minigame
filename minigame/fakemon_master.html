@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>포켓몬 배틀 시뮬레이터</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.6.0/p5.min.js"></script>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: #222;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      font-family: sans-serif;
+    }
+    #canvas-container {
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="canvas-container"></div>
+
+  <script>
+    let gameState = "BATTLE"; 
+    let battleLog = ["배틀 시작! 무엇을 할까?"];
+    let shakeAmount = 0;
+    let damageTexts = []; 
+    let hyperPotionCount = 3; 
+
+    let myParty, enemy, currentPlayer;
+
+    const typeChart = {
+      "불꽃": { "풀": 2.0, "얼음": 2.0, "벌레": 2.0, "강철": 2.0, "불꽃": 0.5, "물": 0.5, "바위": 0.5 },
+      "물": { "불꽃": 2.0, "땅": 2.0, "바위": 2.0, "물": 0.5, "풀": 0.5 },
+      "풀": { "물": 2.0, "땅": 2.0, "바위": 2.0, "불꽃": 0.5, "풀": 0.5 },
+      "격투": { "노말": 2.0, "얼음": 2.0, "바위": 2.0, "강철": 2.0, "고스트": 0 },
+      "고스트": { "에스퍼": 2.0, "고스트": 2.0, "노말": 0 },
+      "땅": { "불꽃": 2.0, "전기": 2.0, "독": 2.0, "바위": 2.0, "강철": 2.0, "비행": 0 }
+    };
+
+    function setup() {
+      let canvas = createCanvas(600, 600);
+      canvas.parent('canvas-container');
+      initGame();
+    }
+
+    function initGame() {
+      myParty = [
+        { name: "리자몽", type: "불꽃", maxHp: 220, hp: 220, color: [255, 70, 0], 
+          moves: [{name:"플레어드라이브", dmg:120, type:"불꽃"}, {name:"화염방사", dmg:90, type:"불꽃"}, {name:"에어슬래시", dmg:75, type:"비행"}] },
+        { name: "이상해꽃", type: "풀", maxHp: 250, hp: 250, color: [60, 180, 60], 
+          moves: [{name:"리프스톰", dmg:130, type:"풀"}, {name:"오물폭탄", dmg:90, type:"독"}, {name:"기가드레인", dmg:75, type:"풀", drain:0.5}] },
+        { name: "거북왕", type: "물", maxHp: 250, hp: 250, color: [40, 110, 255], 
+          moves: [{name:"하이드로캐논", dmg:150, type:"물"}, {name:"하이드로펌프", dmg:110, type:"물"}, {name:"냉동빔", dmg:90, type:"얼음"}] },
+        { name: "루카리오", type: "격투", maxHp: 220, hp: 220, color: [90, 150, 210], 
+          moves: [{name:"인파이트", dmg:120, type:"격투"}, {name:"땅가르기", dmg:999, type:"땅", acc:0.3, ohko:true}, {name:"신속", dmg:80, type:"노말"}] },
+        { name: "팬텀", type: "고스트", maxHp: 200, hp: 200, color: [110, 60, 150], 
+          moves: [{name:"섀도볼", dmg:80, type:"고스트"}, {name:"기습", dmg:70, type:"악"}, {name:"방어", dmg:0, type:"노말", protect:true}, {name:"멸망의노래", dmg:400, type:"고스트"}] }
+      ];
+      currentPlayer = myParty[0];
+      hyperPotionCount = 3;
+      
+      let enemyList = [
+        { name: "마기라스", type: "바위", maxHp: 600, hp: 600, color: [140, 160, 120], moves: [{name:"스톤에지", dmg:100, type:"바위"}] },
+        { name: "메타그로스", type: "강철", maxHp: 550, hp: 550, color: [100, 140, 180], moves: [{name:"코메트펀치", dmg:90, type:"강철"}] }
+      ];
+      enemy = JSON.parse(JSON.stringify(random(enemyList)));
+      gameState = "BATTLE";
+      battleLog = ["배틀 시작!", `야생의 ${enemy.name}(이)가 나타났다!`, `가라! ${currentPlayer.name}!`];
+    }
+
+    function attack(move) {
+      if (gameState !== "BATTLE" || currentPlayer.hp <= 0) return; 
+      gameState = "WAIT";
+      battleLog.push(`${currentPlayer.name}의 ${move.name}!`);
+      
+      setTimeout(() => {
+        if (currentPlayer.hp <= 0) return; 
+
+        if (move.protect) {
+          battleLog.push(`${currentPlayer.name}은(는) 방어 태세에 돌입!`);
+          currentPlayer.isProtecting = true;
+          setTimeout(enemyTurn, 800);
+          return;
+        }
+
+        let isHit = random() < (move.acc !== undefined ? move.acc : 1.0);
+        if (!isHit) {
+          battleLog.push("그러나 공격은 빗나갔다!");
+        } else {
+          let mult = typeChart[move.type]?.[enemy.type] ?? 1.0;
+          let dmg = move.ohko ? enemy.maxHp : floor(move.dmg * mult * 1.5 * random(0.9, 1.1));
+          enemy.hp = max(0, enemy.hp - dmg);
+          damageTexts.push({x: 450, y: 150, val: dmg, a: 255, c: [255, 0, 0]}); 
+          shakeAmount = 15;
+          
+          if (mult >= 2.0) battleLog.push("효과가 굉장했다!");
+          if (mult <= 0.5 && mult > 0) battleLog.push("효과가 별로인 듯하다...");
+          if (mult === 0) battleLog.push("효과가 없는 것 같다...");
+          
+          if (move.drain) {
+            let heal = floor(dmg * move.drain);
+            currentPlayer.hp = min(currentPlayer.maxHp, currentPlayer.hp + heal);
+            battleLog.push(`${currentPlayer.name}은(는) 체력을 회복했다!`);
+          }
+        }
+
+        if (enemy.hp <= 0) {
+          battleLog.push(`${enemy.name}을(를) 쓰러뜨렸다!`);
+          setTimeout(() => { gameState = "WIN"; }, 800);
+        } else {
+          setTimeout(enemyTurn, 800);
+        }
+      }, 600);
+    }
+
+    function enemyTurn() {
+      if (enemy.hp <= 0) return; 
+      let move = random(enemy.moves);
+      battleLog.push(`${enemy.name}의 ${move.name}!`);
+
+      setTimeout(() => {
+        if (currentPlayer.isProtecting) {
+          battleLog.push(`${currentPlayer.name}은(는) 공격을 막아냈다!`);
+          currentPlayer.isProtecting = false; 
+        } else {
+          let mult = typeChart[move.type]?.[currentPlayer.type] ?? 1.0;
+          let dmg = floor(move.dmg * mult * 1.3 * random(0.9, 1.1));
+          currentPlayer.hp = max(0, currentPlayer.hp - dmg);
+          damageTexts.push({x: 150, y: 280, val: dmg, a: 255, c: [255, 0, 0]}); 
+          shakeAmount = 20;
+        }
+
+        if (currentPlayer.hp <= 0) {
+          battleLog.push(`${currentPlayer.name}은(는) 쓰러졌다!`);
+          let alive = myParty.find(p => p.hp > 0);
+          if (!alive) {
+            gameState = "LOSE";
+          } else {
+            // 다른 생존한 포켓몬으로 자동 전환 또는 선택 유도
+            gameState = "BATTLE"; 
+          }
+        } else {
+          gameState = "BATTLE";
+        }
+      }, 800);
+    }
+
+    function draw() {
+      background(240);
+      push();
+      if (shakeAmount > 0) { 
+        translate(random(-shakeAmount, shakeAmount), random(-shakeAmount, shakeAmount)); 
+        shakeAmount *= 0.8; 
+        if (shakeAmount < 0.5) shakeAmount = 0;
+      }
+      
+      // 발판 그리기
+      noStroke(); fill(200); ellipse(150, 350, 300, 100); ellipse(450, 200, 250, 70);
+      
+      // 포켓몬 스포트라이트 (컬러 박스)
+      if (currentPlayer.hp > 0) {
+        fill(currentPlayer.color); stroke(0); strokeWeight(2); rect(100, 240, 100, 100, 15);
+      }
+      if (enemy.hp > 0) {
+        fill(enemy.color); stroke(0); strokeWeight(2); rect(400, 100, 90, 90, 15);
+      }
+      pop();
+      
+      drawHPBox(30, 60, enemy); 
+      drawHPBox(330, 260, currentPlayer);
+      
+      // 데미지 팝업 연출
+      for(let i = damageTexts.length - 1; i >= 0; i--) {
+        let d = damageTexts[i]; fill(d.c[0], d.c[1], d.c[2], d.a);
+        textSize(32); textStyle(BOLD); textAlign(CENTER); text("-" + d.val, d.x, d.y);
+        d.y -= 2; d.a -= 5; if (d.a <= 0) damageTexts.splice(i, 1);
+      }
+      
+      drawUI();
+      if (gameState === "WIN") drawOverlay("VICTORY");
+      if (gameState === "LOSE") drawOverlay("DEFEAT");
+    }
+
+    function drawHPBox(x, y, char) {
+      fill(255); stroke(0); strokeWeight(2); rect(x, y, 230, 60, 10);
+      fill(0); noStroke(); textAlign(LEFT, TOP); textSize(14); textStyle(BOLD);
+      text(char.name, x+15, y+12);
+      
+      // HP 바 배경
+      fill(100); rect(x+15, y+35, 200, 10);
+      // HP 바 잔량
+      fill(char.hp > char.maxHp/2 ? [0,255,100] : [255,50,50]);
+      let hpWidth = map(char.hp, 0, char.maxHp, 0, 200);
+      rect(x+15, y+35, hpWidth, 10);
+    }
+
+    function drawUI() {
+      fill(35, 35, 45); stroke(150, 120, 80); strokeWeight(4); rect(10, 400, 580, 190, 15);
+      fill(255); noStroke(); textAlign(LEFT, TOP); textSize(14);
+      
+      // 로그 출력
+      for(let i=0; i<min(battleLog.length, 4); i++) {
+        text(battleLog[battleLog.length-1-i], 25, 420 + i*22);
+      }
+      
+      if (gameState === "BATTLE" && currentPlayer.hp > 0) {
+        // 기술 버튼 리스트
+        for(let i=0; i<currentPlayer.moves.length; i++) {
+          let x = 360 + (i%2)*115; let y = 420 + floor(i/2)*45;
+          fill(70, 90, 150); stroke(255); strokeWeight(1); rect(x, y, 105, 38, 8);
+          fill(255); noStroke(); textAlign(CENTER, CENTER); textSize(12);
+          text(currentPlayer.moves[i].name, x+52, y+19);
+        }
+        // 상처약 버튼
+        fill(170, 70, 70); stroke(255); rect(360, 515, 220, 35, 8);
+        fill(255); noStroke(); textAlign(CENTER, CENTER); textSize(13);
+        text(`상처약 사용 (${hyperPotionCount})`, 470, 532);
+        
+        // 포켓몬 교체 인터페이스
+        for(let i=0; i<myParty.length; i++) {
+          fill(myParty[i].hp <= 0 ? 60 : (myParty[i] === currentPlayer ? [100, 160, 240] : 110)); 
+          rect(25 + i*53, 530, 48, 25, 5);
+          fill(255); textAlign(CENTER, CENTER); textSize(10); 
+          text(myParty[i].name.substring(0,3), 49+i*53, 542);
+        }
+      }
+    }
+
+    function mousePressed() {
+      if (gameState === "WIN" || gameState === "LOSE") { initGame(); return; }
+      if (gameState !== "BATTLE") return;
+      
+      // 1. 기술 클릭 판정
+      for(let i=0; i<currentPlayer.moves.length; i++) {
+        let x = 360 + (i%2)*115; let y = 420 + floor(i/2)*45;
+        if(mouseX > x && mouseX < x+105 && mouseY > y && mouseY < y+38) {
+          attack(currentPlayer.moves[i]);
+          return;
+        }
+      }
+      
+      // 2. 상처약 클릭 판정
+      if(mouseX > 360 && mouseX < 580 && mouseY > 515 && mouseY < 550) {
+        if (hyperPotionCount > 0 && currentPlayer.hp < currentPlayer.maxHp && currentPlayer.hp > 0) {
+          hyperPotionCount--; 
+          currentPlayer.hp = min(currentPlayer.maxHp, currentPlayer.hp + 200);
+          battleLog.push("상처약을 사용했다!"); 
+          gameState = "WAIT"; 
+          setTimeout(enemyTurn, 800);
+          return;
+        }
+      }
+      
+      // 3. 포켓몬 교체 클릭 판정
+      for(let i=0; i<myParty.length; i++) {
+        let x = 25 + i*53;
+        if(mouseX > x && mouseX < x+48 && mouseY > 530 && mouseY < 555) {
+          if(myParty[i].hp > 0 && myParty[i] !== currentPlayer) {
+            currentPlayer = myParty[i]; 
+            battleLog.push(`${currentPlayer.name}(으)로 교체!`);
+            gameState = "WAIT"; 
+            setTimeout(enemyTurn, 800);
+            return;
+          }
+        }
+      }
+    }
+
+    function drawOverlay(t) { 
+      fill(0, 180); rect(0,0,600,600); 
+      fill(255); textSize(60); textAlign(CENTER, CENTER); textStyle(BOLD); text(t, 300, 280); 
+      textSize(20); textStyle(NORMAL); text("화면을 클릭하면 다시 시작합니다.", 300, 350);
+    }
+  </script>
+</body>
+</html>

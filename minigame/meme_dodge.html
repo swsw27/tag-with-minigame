@@ -1,0 +1,705 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>K-MEME DODGE</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.js"></script>
+    <style>
+        html, body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+        }
+        body {
+            background-color: #111;
+            overflow: hidden;
+            font-family: 'Malgun Gothic', sans-serif;
+            touch-action: none;
+        }
+        #game-container {
+            position: fixed;
+            inset: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        #game-container canvas {
+            display: block;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+            border-radius: 10px;
+        }
+    </style>
+</head>
+<body>
+<div id="game-container"></div>
+
+<script>
+/*
+ * 게임 논리 좌표계: W × H = 600 × 600 (기존 게임과 동일한 감각 유지)
+ * 실제 캔버스: CANVAS_SIZE = 500 × 500 → scale(SCALE)로 축소해서 그림
+ * 게임 로직과 UI 모두 W, H 기준으로 계산하므로 버튼/판정 영역이 일치합니다.
+ * 모든 이동/타이머는 dt(60fps 기준 배율)를 곱해 프레임레이트와 무관하게 동작합니다.
+ */
+const W = 600;
+const H = 600;
+const CANVAS_SIZE = 500;
+const SCALE = CANVAS_SIZE / W;
+
+let dt = 1;
+let player;
+let memes = [];
+let score = 0;
+let gameState = "START";
+let spawnRate = 45;
+let spawnAcc = 0;
+
+// 상점 및 자산 변수
+let totalMoney = 0;
+let upgradeCosts = { lives: 50, speed: 30, shieldTime: 40, shieldItem: 40 };
+let levels = { lives: 0, speed: 0, shieldTime: 0 };
+let hasShieldItem = false;
+
+let muyahoActive = false;
+let lastMuyahoTime = 0;
+const MUYAHO_LIFESPAN = 12000;
+const MUYAHO_COOLDOWN = 4000;
+
+let bombWarningTimer = 0;
+let warningMessage = "";
+let lastCheckScore = 0;
+let lastCoinCheckScore = 0;
+let lastRockCheckScore = 0;
+let lastGuguCheckTime = 0;
+let lastShieldCheckScore = 0;
+let scoreMultiplier = 1;
+let multiplierTimer = 0;
+
+function setup() {
+    const canvas = createCanvas(CANVAS_SIZE, CANVAS_SIZE);
+    canvas.parent("game-container");
+    initGame();
+}
+
+function initGame() {
+    player = new Player();
+    player.lives += levels.lives;
+    player.acc += levels.speed * 0.15;
+    player.invincibleDuration += levels.shieldTime * 500;
+
+    if (hasShieldItem) player.shieldCount = 1;
+
+    memes = [];
+    score = 0;
+    spawnRate = 45;
+    spawnAcc = 0;
+    muyahoActive = false;
+    lastMuyahoTime = millis();
+    lastCheckScore = 0;
+    lastCoinCheckScore = 0;
+    lastRockCheckScore = 0;
+    lastShieldCheckScore = 0;
+    lastGuguCheckTime = millis();
+    scoreMultiplier = 1;
+    multiplierTimer = 0;
+    bombWarningTimer = 0;
+}
+
+function draw() {
+    dt = min(deltaTime / (1000 / 60), 2);
+
+    background(30, 144, 255);
+
+    push();
+    scale(SCALE);
+
+    if (gameState === "START") {
+        drawMenu();
+    } else if (gameState === "PLAY") {
+        playGame();
+    } else if (gameState === "GAMEOVER") {
+        drawGameOver();
+    } else if (gameState === "SHOP") {
+        drawShop();
+    }
+
+    if (gameState !== "SHOP") {
+        drawMoneyUI();
+    }
+    pop();
+}
+
+function drawMoneyUI() {
+    push();
+    textAlign(RIGHT, TOP);
+    textSize(20); textStyle(BOLD);
+    fill(255, 255, 0); stroke(0); strokeWeight(3);
+    text("잔액: " + floor(totalMoney).toLocaleString() + "원", W - 20, 20);
+    pop();
+}
+
+function playGame() {
+    push();
+    textAlign(CENTER, CENTER);
+    textSize(120); textStyle(BOLD);
+    fill(255, 255, 255, 60);
+    text(floor(score), W / 2, H / 2);
+    pop();
+
+    let inWeb = false;
+    for (let m of memes) {
+        if (m instanceof SpiderWeb && m.hits(player)) inWeb = true;
+    }
+    player.update(inWeb);
+    player.display();
+    drawLives();
+    drawUI();
+
+    let currentTime = millis();
+    score += 0.0833 * scoreMultiplier * dt;
+    if (scoreMultiplier > 1 && currentTime > multiplierTimer) scoreMultiplier = 1;
+
+    let s = floor(score);
+
+    if (s > 0 && s % 40 === 0 && lastShieldCheckScore !== s) {
+        lastShieldCheckScore = s;
+        if (random(1) < 0.4) memes.push(new ShieldItem());
+    }
+
+    if (currentTime - lastGuguCheckTime > 5000) {
+        lastGuguCheckTime = currentTime;
+        if (random(1) < 0.35) memes.push(new GuguGaga());
+    }
+
+    if (s > 0 && s % 30 === 0 && lastRockCheckScore !== s) {
+        lastRockCheckScore = s;
+        if (random(1) < 0.25) memes.push(new RollingRock(random(1) < 0.5 ? "LEFT" : "RIGHT"));
+    }
+
+    if (s > 0 && s % 50 === 0 && lastCheckScore !== s) {
+        lastCheckScore = s;
+        if (random(1) < 0.6) {
+            memes.push(new SuperBombMeme());
+            warningMessage = "⚠️ 초강력 폭탄 등장!! (E 연타)";
+            bombWarningTimer = millis() + 3000;
+        }
+    }
+
+    if (s > 0 && s % 40 === 0 && lastCoinCheckScore !== s) {
+        lastCoinCheckScore = s;
+        if (random(1) < 0.3) memes.push(new ScoreCoin());
+    }
+
+    if (!muyahoActive && (currentTime - lastMuyahoTime >= MUYAHO_COOLDOWN)) {
+        memes.push(new MuyahoMeme());
+        muyahoActive = true;
+    }
+
+    spawnAcc += dt;
+    if (spawnAcc >= floor(spawnRate)) {
+        spawnAcc -= floor(spawnRate);
+        if (memes.filter(m => m instanceof NormalMeme).length < 5) {
+            if (random(1) < 0.15) {
+                memes.push(new BombMeme());
+                warningMessage = "💣 폭탄 받아라!!";
+                bombWarningTimer = millis() + 2000;
+            } else {
+                memes.push(new NormalMeme());
+            }
+        }
+        if (spawnRate > 15) spawnRate -= 0.05;
+    }
+
+    for (let i = memes.length - 1; i >= 0; i--) {
+        memes[i].update();
+        memes[i].display();
+
+        if (memes[i] instanceof ShieldItem && memes[i].hits(player)) {
+            player.shieldCount++;
+            memes.splice(i, 1); continue;
+        }
+
+        if (memes[i] instanceof ScoreCoin && memes[i].hits(player)) {
+            scoreMultiplier = 2; multiplierTimer = millis() + 10000;
+            memes.splice(i, 1); continue;
+        }
+
+        if (!(memes[i] instanceof SpiderWeb || memes[i] instanceof GuguGaga) && !player.isInvincible && memes[i].hits(player)) {
+            player.loseLife();
+            if (player.lives <= 0) gameState = "GAMEOVER";
+        }
+        if (memes[i].offScreen()) {
+            if (memes[i] instanceof MuyahoMeme) { muyahoActive = false; lastMuyahoTime = millis(); }
+            memes.splice(i, 1);
+        }
+    }
+}
+
+// --- Player ---
+class Player {
+    constructor() {
+        this.r = 18;
+        this.pos = createVector(W / 2, H / 2);
+        this.vel = createVector(0, 0);
+        this.acc = 0.8;
+        this.friction = 0.9;
+        this.lives = 4;
+        this.isInvincible = false;
+        this.invincibleTimer = 0;
+        this.invincibleDuration = 1500;
+        this.shieldCount = 0;
+    }
+
+    update(inWeb) {
+        let currentAcc = this.acc;
+        let currentFriction = this.friction;
+        if (inWeb) { currentAcc *= 0.6; currentFriction = 0.82; }
+
+        if (keyIsDown(87) || keyIsDown(UP_ARROW))    this.vel.y -= currentAcc * dt;
+        if (keyIsDown(83) || keyIsDown(DOWN_ARROW))  this.vel.y += currentAcc * dt;
+        if (keyIsDown(65) || keyIsDown(LEFT_ARROW))  this.vel.x -= currentAcc * dt;
+        if (keyIsDown(68) || keyIsDown(RIGHT_ARROW)) this.vel.x += currentAcc * dt;
+
+        this.pos.x += this.vel.x * dt;
+        this.pos.y += this.vel.y * dt;
+
+        this.vel.mult(Math.pow(currentFriction, dt));
+
+        this.pos.x = constrain(this.pos.x, this.r, W - this.r);
+        this.pos.y = constrain(this.pos.y, this.r, H - this.r);
+        if (this.isInvincible && millis() > this.invincibleTimer) this.isInvincible = false;
+    }
+
+    display() {
+        push();
+        if (this.shieldCount > 0) {
+            noFill();
+            stroke(0, 200, 255, 180);
+            strokeWeight(2 + this.shieldCount * 2);
+            ellipse(this.pos.x, this.pos.y, this.r * 2.8 + sin(frameCount * 0.1) * 3);
+
+            fill(255); noStroke(); textAlign(CENTER, CENTER); textSize(14); textStyle(BOLD);
+            text(this.shieldCount, this.pos.x, this.pos.y - 30);
+        }
+
+        if (this.isInvincible && frameCount % 10 < 5) fill(255, 255, 255, 150);
+        else fill(0, 255, 150);
+        stroke(255); strokeWeight(2);
+        ellipse(this.pos.x, this.pos.y, this.r * 2);
+        pop();
+    }
+
+    loseLife() {
+        if (this.shieldCount > 0) {
+            this.shieldCount--;
+            this.isInvincible = true;
+            this.invincibleTimer = millis() + 800;
+            return;
+        }
+        this.lives--;
+        this.isInvincible = true;
+        this.invincibleTimer = millis() + this.invincibleDuration;
+    }
+}
+
+// --- ShieldItem ---
+class ShieldItem {
+    constructor() {
+        this.r = 20;
+        this.x = random(50, W - 50);
+        this.y = random(50, H - 50);
+        this.lifeSpan = millis() + 7000;
+    }
+    update() {}
+    display() {
+        push();
+        let bounce = sin(frameCount * 0.15) * 8;
+        fill(0, 150, 255); stroke(255); strokeWeight(2);
+        beginShape();
+        for (let a = 0; a < TWO_PI; a += PI / 3) {
+            vertex(this.x + cos(a) * this.r, (this.y + bounce) + sin(a) * this.r);
+        }
+        endShape(CLOSE);
+        fill(255); noStroke(); textAlign(CENTER, CENTER); textStyle(BOLD); textSize(12);
+        text("SHIELD", this.x, this.y + bounce);
+        pop();
+    }
+    hits(p) { return dist(this.x, this.y, p.pos.x, p.pos.y) < this.r + p.r; }
+    offScreen() { return millis() > this.lifeSpan; }
+}
+
+function drawMenu() {
+    push();
+    rectMode(CENTER); fill(0, 80, 200, 220); rect(W / 2, H / 2, 450, 420, 20);
+    textAlign(CENTER, CENTER); fill(255); textSize(40); textStyle(BOLD);
+    text("K-MEME DODGE", W / 2, H / 2 - 130);
+    textSize(16); textStyle(NORMAL);
+    text("WASD : 이동 / E : 폭탄 해체\n방패는 중첩이 가능합니다!", W / 2, H / 2 - 40);
+    fill(255, 255, 0); rect(W / 2, H / 2 + 60, 160, 50, 10);
+    fill(0); textSize(22); textStyle(BOLD); text("게임 시작", W / 2, H / 2 + 60);
+    fill(0, 200, 100); rect(W / 2, H / 2 + 125, 160, 50, 10);
+    fill(255); text("상점 이용", W / 2, H / 2 + 125);
+    pop();
+}
+
+function drawGameOver() {
+    push();
+    background(0, 200);
+    textAlign(CENTER, CENTER); fill(255, 50, 50); textSize(70); textStyle(BOLD);
+    text("GAME OVER", W / 2, H / 2 - 120);
+    let earned = (floor(score) * 0.1).toFixed(1);
+    fill(255); textSize(25);
+    text("최종 점수: " + floor(score), W / 2, H / 2 - 50);
+    fill(255, 215, 0);
+    text("획득 금액: +" + earned + "원", W / 2, H / 2 - 15);
+    rectMode(CENTER);
+    fill(255); rect(W / 2, H / 2 + 50, 200, 45, 10);
+    fill(0); textSize(20); text("다시 시작", W / 2, H / 2 + 50);
+    fill(0, 200, 100); rect(W / 2, H / 2 + 105, 200, 45, 10);
+    fill(255); text("상점 가기", W / 2, H / 2 + 105);
+    fill(200); rect(W / 2, H / 2 + 160, 200, 45, 10);
+    fill(0); text("메인 메뉴", W / 2, H / 2 + 160);
+    pop();
+}
+
+function drawShop() {
+    push();
+    fill(30); rect(50, 50, 500, 500, 20);
+    textAlign(CENTER); fill(255, 215, 0); textSize(40); textStyle(BOLD);
+    text("MEME SHOP", W / 2, 110);
+    fill(255); textSize(20);
+    text("보유 잔액: " + totalMoney.toFixed(1) + "원", W / 2, 150);
+    drawUpgradeBtn(0, "최대 목숨 (+1)", upgradeCosts.lives, levels.lives, 180);
+    drawUpgradeBtn(1, "이동 속도 (+)", upgradeCosts.speed, levels.speed, 270);
+    drawUpgradeBtn(2, "무적 시간 (+)", upgradeCosts.shieldTime, levels.shieldTime, 360);
+    fill(255, 50, 50); rect(W / 2 - 60, 480, 120, 40, 10);
+    fill(255); textSize(18); text("나가기", W / 2, 505);
+    pop();
+}
+
+function drawUpgradeBtn(id, label, cost, lv, y) {
+    push();
+    fill(60); stroke(255, 50); rect(100, y, 400, 75, 10);
+    fill(255); textAlign(LEFT); textSize(18); textStyle(BOLD);
+    text(label + " [Lv." + lv + "]", 120, y + 30);
+    fill(200); textSize(16); textStyle(NORMAL);
+    text("가격: " + cost + "원", 120, y + 55);
+    fill(totalMoney >= cost ? color(0, 200, 100) : color(100)); noStroke();
+    rect(380, y + 18, 100, 40, 5);
+    fill(255); textAlign(CENTER); text("구매", 430, y + 43);
+    pop();
+}
+
+// 캔버스 좌표(0~500)를 게임 논리 좌표(0~600)로 변환
+function logicalX(px) { return px / SCALE; }
+function logicalY(py) { return py / SCALE; }
+
+function mousePressed() {
+    const mx = logicalX(mouseX);
+    const my = logicalY(mouseY);
+
+    if (gameState === "START") {
+        if (mx > 220 && mx < 380 && my > 335 && my < 385) { initGame(); gameState = "PLAY"; }
+        if (mx > 220 && mx < 380 && my > 400 && my < 450) { gameState = "SHOP"; }
+    } else if (gameState === "GAMEOVER") {
+        let earned = floor(score) * 0.1;
+        if (mx > 200 && mx < 400) {
+            if (my > 325 && my < 375) { totalMoney += earned; initGame(); gameState = "PLAY"; }
+            else if (my > 380 && my < 430) { totalMoney += earned; gameState = "SHOP"; }
+            else if (my > 435 && my < 485) { totalMoney += earned; gameState = "START"; }
+        }
+    } else if (gameState === "SHOP") {
+        if (mx > 380 && mx < 480) {
+            if (my > 198 && my < 238 && totalMoney >= upgradeCosts.lives) {
+                totalMoney -= upgradeCosts.lives; levels.lives++;
+                upgradeCosts.lives = floor(upgradeCosts.lives * 1.8);
+            } else if (my > 288 && my < 328 && totalMoney >= upgradeCosts.speed) {
+                totalMoney -= upgradeCosts.speed; levels.speed++;
+                upgradeCosts.speed = floor(upgradeCosts.speed * 1.5);
+            } else if (my > 378 && my < 418 && totalMoney >= upgradeCosts.shieldTime) {
+                totalMoney -= upgradeCosts.shieldTime; levels.shieldTime++;
+                upgradeCosts.shieldTime = floor(upgradeCosts.shieldTime * 1.6);
+            }
+        }
+        if (mx > 240 && mx < 360 && my > 480 && my < 520) { gameState = "START"; }
+    }
+}
+
+function drawUI() {
+    push();
+    textAlign(CENTER, CENTER);
+    if (millis() < bombWarningTimer) {
+        fill(255, 255, 0); stroke(0); strokeWeight(4); textSize(30); textStyle(BOLD);
+        text(warningMessage, W / 2, 90);
+    }
+    if (scoreMultiplier > 1) {
+        fill(255, 255, 0); textSize(20); textStyle(BOLD);
+        let timeLeft = ((multiplierTimer - millis()) / 1000).toFixed(1);
+        text("🔥 점수 2배! " + timeLeft + "s", W / 2, 130);
+    }
+    pop();
+}
+
+function drawLives() {
+    push();
+    textAlign(LEFT, TOP); textSize(25);
+    let h = "";
+    for (let i = 0; i < player.lives; i++) h += "❤️";
+    text(h, 20, 20);
+    pop();
+}
+
+function keyPressed() {
+    if (key === 'e' || key === 'E') {
+        for (let m of memes) {
+            if (m instanceof SuperBombMeme && !m.exploded) {
+                if (dist(player.pos.x, player.pos.y, m.x, m.y) < 150) m.defuse();
+            }
+        }
+    }
+}
+
+class GuguGaga {
+    constructor() {
+        this.x = random(100, W - 100);
+        this.y = random(100, H - 100);
+        this.originY = this.y;
+        this.spawnTime = millis();
+        this.duration = 3000;
+        this.exitDuration = 2000;
+        this.webTriggered = false;
+        this.done = false;
+    }
+    update() {
+        let elapsed = millis() - this.spawnTime;
+        if (!this.webTriggered && elapsed > 2000) {
+            memes.push(new SpiderWeb());
+            this.webTriggered = true;
+        }
+        if (elapsed > this.duration) {
+            let moveProgress = (elapsed - this.duration) / this.exitDuration;
+            this.y = this.originY - (moveProgress * 400);
+            if (moveProgress >= 1) this.done = true;
+        }
+    }
+    display() {
+        push();
+        translate(this.x, this.y);
+        fill(255, 0, 255); triangle(0, -40, -40, 30, 40, 30);
+        fill(255); textAlign(CENTER, CENTER); textSize(12);
+        text("GUGU\nGAGA", 0, 5);
+        pop();
+    }
+    hits() { return false; }
+    offScreen() { return this.done; }
+}
+
+class SpiderWeb {
+    constructor() {
+        this.x = W / 2; this.y = H / 2; this.r = 150;
+        this.spawnTime = millis(); this.duration = 10000; this.done = false;
+    }
+    update() { if (millis() - this.spawnTime > this.duration) this.done = true; }
+    display() {
+        let elapsed = millis() - this.spawnTime;
+        let alphaVal = map(min(elapsed, 1000), 0, 1000, 0, 120);
+        push();
+        fill(255, 255, 255, alphaVal * 0.3); stroke(255, alphaVal);
+        ellipse(this.x, this.y, this.r * 2);
+        textAlign(CENTER, CENTER);
+        fill(255, 255, 0, alphaVal + 50); textSize(22);
+        text("SLOW ZONE", this.x, this.y);
+        pop();
+    }
+    hits(p) { return dist(p.pos.x, p.pos.y, this.x, this.y) < this.r; }
+    offScreen() { return this.done; }
+}
+
+class RollingRock {
+    constructor(side) {
+        this.side = side;
+        this.w = (W * 2) / 3;
+        this.h = 160;
+        this.spawnTime = millis();
+        this.delay = 3500;
+        this.speed = 13;
+        this.y = -this.h;
+        this.done = false;
+        this.startX = (this.side === "LEFT") ? 0 : W - this.w;
+    }
+    update() {
+        if (millis() - this.spawnTime > this.delay) {
+            this.y += this.speed * dt;
+            if (this.y > H) this.done = true;
+        }
+    }
+    display() {
+        let elapsed = millis() - this.spawnTime;
+        push();
+        if (elapsed < this.delay) {
+            if (frameCount % 20 < 10) {
+                fill(255, 0, 0, 60); rect(this.startX, 0, this.w, H);
+                fill(255); textAlign(CENTER, CENTER); textSize(35);
+                text("⚠️ 돌 굴러가유우우!!!", this.startX + this.w / 2, H / 2);
+            }
+        } else {
+            fill(100, 90, 80);
+            rect(this.startX, this.y, this.w, this.h, 15);
+        }
+        pop();
+    }
+    hits(p) {
+        let elapsed = millis() - this.spawnTime;
+        if (elapsed < this.delay) return false;
+        return p.pos.x > this.startX && p.pos.x < this.startX + this.w &&
+               p.pos.y > this.y && p.pos.y < this.y + this.h;
+    }
+    offScreen() { return this.done; }
+}
+
+class NormalMeme {
+    constructor() {
+        this.r = 22;
+        let side = floor(random(4));
+        if (side === 0)      { this.x = random(W); this.y = -this.r; }
+        else if (side === 1) { this.x = random(W); this.y = H + this.r; }
+        else if (side === 2) { this.x = -this.r;   this.y = random(H); }
+        else                 { this.x = W + this.r; this.y = random(H); }
+        let angle = atan2(player.pos.y - this.y, player.pos.x - this.x);
+        let speed = random(2.5, 4.5);
+        this.vx = cos(angle) * speed;
+        this.vy = sin(angle) * speed;
+        this.txt = random(["어쩔티비", "엄준식", "사딸라", "상상도 못한", "수박도", "중꺾마"]);
+    }
+    update() {
+        this.x += this.vx * dt;
+        this.y += this.vy * dt;
+    }
+    display() {
+        push();
+        rectMode(CENTER); textAlign(CENTER, CENTER);
+        fill(255); rect(this.x, this.y, 80, 30, 5);
+        fill(0); text(this.txt, this.x, this.y);
+        pop();
+    }
+    hits(p) { return dist(this.x, this.y, p.pos.x, p.pos.y) < this.r + p.r; }
+    offScreen() { return (this.x < -150 || this.x > W + 150 || this.y < -150 || this.y > H + 150); }
+}
+
+class BombMeme {
+    constructor() {
+        this.x = random(100, W - 100);
+        this.y = random(100, H - 100);
+        this.spawnTime = millis();
+        this.fuseTime = 2500;
+        this.blastRadius = 110;
+        this.exploded = false;
+        this.done = false;
+    }
+    update() {
+        if (!this.exploded && millis() - this.spawnTime > this.fuseTime) this.exploded = true;
+        if (this.exploded && millis() - this.spawnTime > this.fuseTime + 500) this.done = true;
+    }
+    display() {
+        push();
+        if (!this.exploded) {
+            fill(50); ellipse(this.x, this.y, 40);
+            noFill(); stroke(255, 0, 0);
+            ellipse(this.x, this.y, map(millis() - this.spawnTime, 0, this.fuseTime, 0, this.blastRadius * 2));
+        } else {
+            fill(255, 100, 0, 200);
+            ellipse(this.x, this.y, this.blastRadius * 2);
+        }
+        pop();
+    }
+    hits(p) { return (this.exploded && !this.done) ? dist(this.x, this.y, p.pos.x, p.pos.y) < this.blastRadius : false; }
+    offScreen() { return this.done; }
+}
+
+class SuperBombMeme {
+    constructor() {
+        this.x = W / 2; this.y = H / 2;
+        this.spawnTime = millis();
+        this.fuseTime = 6000;
+        this.blastRadius = 450;
+        this.eCount = 0;
+        this.defused = false;
+        this.exploded = false;
+        this.done = false;
+    }
+    defuse() { this.eCount++; if (this.eCount >= 12) this.defused = true; }
+    update() {
+        if (this.defused) this.done = true;
+        else if (!this.exploded && millis() - this.spawnTime > this.fuseTime) this.exploded = true;
+        if (this.exploded && millis() - this.spawnTime > this.fuseTime + 800) this.done = true;
+    }
+    display() {
+        push();
+        textAlign(CENTER, CENTER);
+        if (!this.exploded) {
+            fill(0); stroke(255, 215, 0); strokeWeight(5);
+            ellipse(this.x, this.y, 110);
+            fill(255); noStroke();
+            text("E 연타!!\n" + this.eCount + "/12", this.x, this.y);
+            noFill(); stroke(255, 0, 0);
+            ellipse(this.x, this.y, map(millis() - this.spawnTime, 0, this.fuseTime, 0, this.blastRadius * 2));
+        } else {
+            fill(255, 0, 0, 230);
+            ellipse(this.x, this.y, this.blastRadius * 2);
+        }
+        pop();
+    }
+    hits(p) { return (this.exploded && !this.done) ? dist(this.x, this.y, p.pos.x, p.pos.y) < this.blastRadius : false; }
+    offScreen() { return this.done; }
+}
+
+class ScoreCoin {
+    constructor() {
+        this.r = 18;
+        this.x = random(50, W - 50);
+        this.y = random(50, H - 50);
+        this.lifeSpan = millis() + 5000;
+    }
+    update() {}
+    display() {
+        push();
+        let bounce = sin(frameCount * 0.1) * 5;
+        fill(255, 215, 0); ellipse(this.x, this.y + bounce, this.r * 2);
+        fill(0); textAlign(CENTER, CENTER); text("X2", this.x, this.y + bounce);
+        pop();
+    }
+    hits(p) { return dist(this.x, this.y, p.pos.x, p.pos.y) < this.r + p.r; }
+    offScreen() { return millis() > this.lifeSpan; }
+}
+
+class MuyahoMeme {
+    constructor() {
+        this.r = 30;
+        this.x = random(W);
+        this.y = -this.r;
+        this.spawnTime = millis();
+        this.speed = 1.3;
+        this.txt = "무야호~";
+    }
+    update() {
+        let angle = atan2(player.pos.y - this.y, player.pos.x - this.x);
+        this.x += cos(angle) * this.speed * dt;
+        this.y += sin(angle) * this.speed * dt;
+    }
+    display() {
+        push();
+        rectMode(CENTER); textAlign(CENTER, CENTER);
+        let t = (MUYAHO_LIFESPAN - (millis() - this.spawnTime)) / 1000;
+        fill(255, 50, 50); rect(this.x, this.y, 85, 50, 8);
+        fill(255); text(this.txt, this.x, this.y - 8);
+        textSize(11);
+        text(max(0, t).toFixed(1) + "s", this.x, this.y + 12);
+        pop();
+    }
+    hits(p) { return dist(this.x, this.y, p.pos.x, p.pos.y) < this.r + p.r; }
+    offScreen() { return (millis() - this.spawnTime > MUYAHO_LIFESPAN); }
+}
+</script>
+</body>
+</html>

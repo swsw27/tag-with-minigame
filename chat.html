@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>채팅</title>
+<style>
+	* { box-sizing: border-box; }
+	html, body {
+		margin: 0; height: 100%;
+		background: #090d16;
+		color: #f1f5f9;
+		font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+		font-size: 13px;
+	}
+	body { display: flex; flex-direction: column; }
+
+	/* 커스텀 스크롤바 */
+	#log::-webkit-scrollbar { width: 4px; }
+	#log::-webkit-scrollbar-track { background: transparent; }
+	#log::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+	#log::-webkit-scrollbar-thumb:hover { background: #475569; }
+
+	header {
+		display: flex; align-items: center; justify-content: space-between;
+		padding: 12px 14px;
+		background: rgba(30, 41, 59, 0.7);
+		backdrop-filter: blur(8px);
+		border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+		font-weight: 700;
+		letter-spacing: -0.3px;
+	}
+	header span::before {
+		content: "";
+		display: inline-block;
+		width: 8px; height: 8px;
+		background: #10b981;
+		border-radius: 50%;
+		margin-right: 6px;
+		box-shadow: 0 0 8px #10b981;
+	}
+
+	#close {
+		background: none; border: none; color: #64748b;
+		font-size: 16px; line-height: 1; cursor: pointer; padding: 4px 6px;
+		border-radius: 6px; transition: all 0.2s ease;
+	}
+	#close:hover { color: #f8fafc; background: rgba(255, 255, 255, 0.1); }
+
+	#log {
+		flex: 1; overflow-y: auto;
+		padding: 12px 14px;
+		display: flex; flex-direction: column; gap: 10px;
+	}
+
+	/* 메시지 생성 애니메이션 */
+	.msg {
+		max-width: 80%;
+		animation: fadeIn 0.25s ease-out forwards;
+	}
+	@keyframes fadeIn {
+		from { opacity: 0; transform: translateY(6px); }
+		to { opacity: 1; transform: translateY(0); }
+	}
+
+	.msg .who {
+		font-size: 11px; color: #64748b; margin-bottom: 4px; font-weight: 500;
+	}
+	.msg .bubble {
+		background: #1e293b;
+		padding: 8px 12px;
+		border-radius: 14px 14px 14px 2px;
+		word-break: break-word; white-space: pre-wrap;
+		line-height: 1.45;
+		border: 1px solid rgba(255, 255, 255, 0.05);
+		box-shadow: 0 2px 4px rgba(0, 0, 0, 0.15);
+	}
+
+	.msg.mine { align-self: flex-end; text-align: right; }
+	.msg.mine .who { display: none; }
+	.msg.mine .bubble {
+		background: linear-gradient(135deg, #06b6d4 0%, #0891b2 100%);
+		color: #ffffff;
+		border-radius: 14px 14px 2px 14px;
+		border: none;
+		box-shadow: 0 2px 8px rgba(6, 182, 212, 0.25);
+	}
+
+	.sys {
+		color: #475569; font-size: 11px; text-align: center;
+		margin: 4px 0; font-weight: 500;
+	}
+
+	/* 입력 폼: 하단 여백을 주어 Netlify 배지(우하단 고정)와 겹치지 않도록 위로 올림 */
+	form {
+		display: flex; gap: 8px;
+		padding: 10px 12px;
+		margin: 0 0 64px 0;            /* 배지 높이만큼 위로 띄움 */
+		background: rgba(15, 23, 42, 0.95);
+		border-top: 1px solid rgba(255, 255, 255, 0.08);
+	}
+	input {
+		flex: 1; min-width: 0;
+		background: #1e293b; color: #fff;
+		border: 1px solid #334155; border-radius: 10px;
+		padding: 9px 12px; font: inherit;
+		transition: all 0.2s ease;
+	}
+	input:focus {
+		outline: none;
+		border-color: #06b6d4;
+		box-shadow: 0 0 0 3px rgba(6, 182, 212, 0.15);
+	}
+	button[type="submit"] {
+		background: linear-gradient(135deg, #06b6d4, #0891b2);
+		color: #fff; border: none; border-radius: 10px;
+		padding: 0 14px; font: inherit; font-weight: 600; cursor: pointer;
+		transition: all 0.2s ease;
+		box-shadow: 0 2px 6px rgba(6, 182, 212, 0.2);
+	}
+	button[type="submit"]:hover {
+		filter: brightness(1.1);
+		transform: translateY(-1px);
+	}
+	button[type="submit"]:active {
+		transform: translateY(0);
+	}
+</style>
+</head>
+<body>
+<header>
+  <span>💬 채팅</span>
+  <button id="close" type="button" aria-label="닫기" title="닫기 (Esc)">✕</button>
+</header>
+
+<div id="log">
+  <div class="sys">같은 방 사람들에게만 보입니다. 새로고침하면 기록이 사라져요.</div>
+</div>
+
+<form id="form" autocomplete="off">
+  <input id="input" maxlength="60" placeholder="메시지 입력 후 Enter">
+  <button type="submit">전송</button>
+</form>
+
+<script>
+(function () {
+  const MAX_LEN = 60;        // 메인 sketch.js 의 CHAT_MAX_LEN 과 같게 유지
+  const COOLDOWN_MS = 800;   // 도배 방지 (클라이언트 쪽)
+
+  const log = document.getElementById('log');
+  const form = document.getElementById('form');
+  const input = document.getElementById('input');
+  const closeBtn = document.getElementById('close');
+  let lastSentAt = 0;
+
+  // 부모 페이지에서 직접 열었을 때 (iframe 이 아닐 때) 안내
+  const standalone = window.parent === window;
+
+  function scrollToBottom() {
+    log.scrollTop = log.scrollHeight;
+  }
+
+  // 모든 내용은 textContent 로만 넣는다 (innerHTML 금지: 다른 플레이어의 입력은 신뢰하지 않음)
+  function addLine(name, text, mine) {
+    const wrap = document.createElement('div');
+    wrap.className = 'msg' + (mine ? ' mine' : '');
+
+    const who = document.createElement('div');
+    who.className = 'who';
+    who.textContent = name || '???';
+
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    bubble.textContent = text;
+
+    wrap.appendChild(who);
+    wrap.appendChild(bubble);
+    log.appendChild(wrap);
+    scrollToBottom();
+  }
+
+  function addSys(text) {
+    const d = document.createElement('div');
+    d.className = 'sys';
+    d.textContent = text;
+    log.appendChild(d);
+    scrollToBottom();
+  }
+
+  // iframe 안에 남은 키보드 포커스를 모두 해제 (닫은 뒤 키 입력이 부모로 넘어가도록)
+  function blurAll() {
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+    input.blur();
+    closeBtn.blur();
+  }
+
+  function requestClose() {
+    blurAll();
+    if (standalone) return;
+    window.parent.postMessage({ type: 'CHAT_CLOSE' }, '*');
+  }
+
+  // 부모(sketch.js) → 채팅창
+  window.addEventListener('message', (e) => {
+    if (e.source !== window.parent || !e.data) return;
+    const d = e.data;
+    if (d.type === 'CHAT_OPEN') {
+      input.focus();
+    } else if (d.type === 'CHAT_BLUR') {
+      blurAll();
+    } else if (d.type === 'CHAT_MSG') {
+      addLine(String(d.name || ''), String(d.text || ''), !!d.mine);
+    }
+  });
+
+  // 채팅창 → 부모(sketch.js)
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    if (standalone) { addSys('게임 화면에서 열어야 채팅이 전송됩니다.'); return; }
+
+    const text = input.value.replace(/\s+/g, ' ').trim();
+    if (!text) return;
+
+    const now = Date.now();
+    if (now - lastSentAt < COOLDOWN_MS) { addSys('조금만 천천히 보내주세요.'); return; }
+    lastSentAt = now;
+
+    window.parent.postMessage({ type: 'CHAT_SEND', text: text.slice(0, MAX_LEN) }, '*');
+    input.value = '';
+  });
+
+  closeBtn.addEventListener('click', requestClose);
+
+  // Esc 로 닫기
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') requestClose();
+  });
+
+  if (standalone) addSys('이 파일은 게임 화면 안에서 열려야 동작합니다.');
+})();
+</script>
+</body>
+</html>

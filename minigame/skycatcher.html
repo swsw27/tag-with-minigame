@@ -1,0 +1,1532 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8"> <title>Sky Catcher v1.16.0 (Online Edition)</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <style>
+        body { margin: 0; background: #222; display: flex; flex-direction: column; justify-content: center; align-items: center; height: 100vh; overflow: hidden; font-family: 'Malgun Gothic', sans-serif; touch-action: none; }
+        #ui-container { width: 100%; max-width: 600px; display: flex; justify-content: space-between; align-items: center; padding: 0 15px; box-sizing: border-box; color: white; height: 60px; z-index: 10; }
+        .ui-item { font-size: 18px; font-weight: bold; text-shadow: 2px 2px 4px #000; }
+        #main-btn { padding: 8px 15px; background: #ff4757; color: white; border: none; border-radius: 5px; cursor: pointer; display: none; font-weight: bold; }
+        canvas { border: 5px solid #fff; box-shadow: 0 0 30px rgba(255,255,255,0.2); background-color: #000; max-height: calc(100vh - 80px); max-width: 95vw; object-fit: contain; }
+    </style>
+</head>
+<body>
+
+    <div id="ui-container">
+        <div id="score-display" class="ui-item"></div>
+        <div id="time-display" class="ui-item" style="visibility: hidden;"></div>
+        <button id="main-btn" onclick="goToMenu()">메인으로</button>
+    </div>
+
+    <canvas id="gameCanvas" width="600" height="800"></canvas>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const scoreDisplay = document.getElementById('score-display');
+        const timeDisplay = document.getElementById('time-display');
+        const mainBtn = document.getElementById('main-btn');
+
+        // ==========================================
+        // [1] 자원 로드 및 관리
+        // ==========================================
+        let imagesLoaded = 0;
+        const totalImages = 5;
+        const deathImg = new Image(); deathImg.src = 'https://i.postimg.cc/2SKJNM5s/new-m100pointblock.png';
+        const disturbImg = new Image(); disturbImg.src = 'https://i.postimg.cc/x865yNND/new-disblock.png';
+        const luckyImg = new Image(); luckyImg.src = 'https://i.postimg.cc/CLcMjWTJ/p200pointblock.png';
+        const tipImg = new Image(); tipImg.src = 'https://i.postimg.cc/qqLJDFN5/skycatchertip.png';
+        const kkikkimongImg = new Image(); kkikkimongImg.src = 'https://i.postimg.cc/3Jrckq6m/IMG-20260607-193700.jpg';
+
+        requestAnimationFrame(gameLoop);
+
+        const bgmMenu = new Audio('https://assets.mixkit.co/active_storage/sfx/123/123-84.wav');
+        const bgmGame = new Audio('https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3');
+        bgmMenu.loop = true; bgmGame.loop = true;
+
+        let globalVolume = 0.1;
+        function updateBgmVolume() { bgmMenu.volume = globalVolume * 0.7; bgmGame.volume = globalVolume * 0.7; }
+        function playBgm(mode) {
+            try {
+                if (mode === 'menu') { bgmGame.pause(); bgmGame.currentTime = 0; bgmGame.playbackRate = 1.0; if (bgmMenu.paused && globalVolume > 0) bgmMenu.play().catch(()=>{}); }
+                else if (mode === 'game') { bgmMenu.pause(); bgmMenu.currentTime = 0; if (bgmGame.paused && globalVolume > 0) bgmGame.play().catch(()=>{}); }
+                else if (mode === 'stop') { bgmMenu.pause(); bgmGame.pause(); }
+            } catch(e) {}
+        }
+
+        // ==========================================
+        // [2] 게임 핵심 데이터 및 설정
+        // ==========================================
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        function playSynthSound(type) {
+            if (globalVolume <= 0) return; if (audioCtx.state === 'suspended') audioCtx.resume();
+            const osc = audioCtx.createOscillator(); const gain = audioCtx.createGain();
+            osc.connect(gain); gain.connect(audioCtx.destination);
+            if (type === 'collect') { osc.type = 'sine'; osc.frequency.setValueAtTime(880, audioCtx.currentTime); gain.gain.setValueAtTime(globalVolume, audioCtx.currentTime); gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.1); osc.start(); osc.stop(audioCtx.currentTime + 0.1); }
+            else if (type === 'bomb') { osc.type = 'sawtooth'; osc.frequency.setValueAtTime(150, audioCtx.currentTime); osc.frequency.linearRampToValueAtTime(50, audioCtx.currentTime + 0.3); gain.gain.setValueAtTime(globalVolume * 2, audioCtx.currentTime); gain.gain.linearRampToValueAtTime(0.001, audioCtx.currentTime + 0.3); osc.start(); osc.stop(audioCtx.currentTime + 0.3); }
+            else if (type === 'special') { osc.type = 'square'; osc.frequency.setValueAtTime(1200, audioCtx.currentTime); gain.gain.setValueAtTime(globalVolume * 0.5, audioCtx.currentTime); gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.2); osc.start(); osc.stop(audioCtx.currentTime + 0.2); }
+        }
+
+        // ==========================================
+        // 🎲 결정적 난수 + 고정 스텝 (온라인 락스텝 대전의 기반)
+        //   - 게임 규칙에 영향을 주는 난수는 전부 rnd() 를 사용 (같은 시드 → 같은 결과)
+        //   - 화면 연출용 난수(파티클, 별 등)는 Math.random 을 그대로 사용
+        //   - 게임 로직은 항상 1/60초 단위로만 진행
+        // ==========================================
+        const STEP = 1 / 60;
+        let rngState = 1;
+        function seedRng(s) { rngState = (s >>> 0) || 1; }
+        function rnd() {
+            rngState = (rngState + 0x6D2B79F5) >>> 0;
+            let t = rngState;
+            t = Math.imul(t ^ (t >>> 15), t | 1);
+            t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        let acc = 0;            // 고정 스텝 누적 시간
+        let secFrames = 0;      // 1초(60프레임) 카운터 (Date.now 대신 사용)
+        let simKkikki = false;  // 이번 판에 끼끼몽 블록이 나오는지 (온라인에서는 방장 설정을 따름)
+
+        let totalXP = parseInt(localStorage.getItem('totalXP')) || 0;
+        let selectedPet = localStorage.getItem('selectedPet') || 'scientist'; let selectedPet2 = localStorage.getItem('selectedPet2') || 'scientist'; let fatePet = localStorage.getItem('fatePet') || 'scientist';
+        let isKkikkimong = localStorage.getItem('isKkikkimong') === 'true' || false; let petSelectTarget = 1;
+
+        const petList = [
+            { id: 'scientist', name: '괴짜 과학자', desc: ['자석: 상시 발동, 근처 금블록을 플레이어 쪽으로 약하게', '끌어당김 (배터리 서서히 소모)'] },
+            { id: 'mathematician', name: '이상한 수학자', desc: ['경감: 폭탄 및 데스블록 충돌 시 감점 피해량을 1/5로 경감', '(배터리 사용)'] },
+            { id: 'walker', name: '운좋은 행인', desc: ['행운: 펫 활성화 시 행운블록 스폰 확률 5배 증가', '(배터리 사용)'] },
+            { id: 'artist', name: '떡칠 미술가', desc: ['방어: 방해블록 최초 1회 완벽 무효화. 성공 시 즉시 방전되며', '과부하 발생 (100% 재충전 시 보호막 재생성)'] },
+            { id: 'musician', name: '시끄러운 음악가', desc: ['정화: 펫 활성화 상태 유지 시 5초마다 화면 내 모든', '나쁜 블록(폭탄, 데스, 방해)을일괄 소멸시킴'] }
+        ];
+
+        let gameState = 'intro'; let introTimer = 0.85; let introAlpha = 0; let introProgress = 0;
+        let lastGameMode = ''; let aiDifficulty = 'normal'; let bgTheme = 'sky'; let timer = 180; let keys = {};
+        let controlType = 'pc'; let mobileMove = 0; let lastTimestamp = 0; let notification = { msg: '', timer: 0, color: '#fff' }; let spurtAlertDone = false;
+        let totalTrainingTime = 0;
+
+        // [카운트다운 시스템 관련 변수]
+        let isCountingDown = false;
+        let countdownTimer = 3.0;
+
+        let particles = []; let screenShakeTime = 0;
+        let globalBadBlockCooldown1P = 0; let globalBadBlockCooldown2P = 0;
+
+        let players = [
+            { id: 1, x: 265, y: 730, w: 70, h: 20, speed: 650, score: 0, color: '#FFD700', disturbed: false, disturbType: null, rouletteTimer: 0, dLeft: 0, area: [0, 600], score2000Alert: false, artistShield: true, pet: null, petEnabled: false, petBattery: 100, activePet: null, musicianTimer: 0, overheatTimer: 0, drainRate: 12.5 },
+            { id: 2, x: 415, y: 730, w: 70, h: 20, speed: 650, score: 0, color: '#00FF7F', disturbed: false, disturbType: null, rouletteTimer: 0, dLeft: 0, area: [300, 600], score2000Alert: false, artistShield: true, pet: null, petEnabled: false, petBattery: 100, activePet: null, musicianTimer: 0, overheatTimer: 0, drainRate: 12.5 }
+        ];
+
+        // 2인 화면(좌/우 분할)을 쓰는 모드인지
+        function isTwoP() { return gameState === 'dual' || gameState === 'ai' || gameState === 'online'; }
+
+        let items = []; let starDots = []; let fireDots = []; let bubbleDots = [];
+        for(let i=0; i<40; i++) {
+            starDots.push({ x: Math.random()*600, y: Math.random()*800, size: Math.random()*2+1, speed: Math.random()*20 + 10 });
+            fireDots.push({ x: Math.random()*600, y: Math.random()*800, size: Math.random()*5+2, speed: 30 });
+            bubbleDots.push({ x: Math.random()*600, y: Math.random()*800, size: Math.random()*3+2, speed: Math.random()*15 + 10 });
+        }
+
+        function createParticles(x, y, color, count, type) {
+            for (let i = 0; i < count; i++) {
+                let angle = Math.random() * Math.PI * 2;
+                let speed = Math.random() * (type === 'smoke' ? 140 : 260) + 60;
+                particles.push({
+                    x: x, y: y,
+                    vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed,
+                    life: 1.0, color: color, size: Math.random() * (type === 'smoke' ? 10 : 5) + 3, type: type
+                });
+            }
+        }
+
+        function getMousePos(e) {
+            const rect = canvas.getBoundingClientRect(); const scaleX = canvas.width / rect.width; const scaleY = canvas.height / rect.height;
+            let clientX = e.touches && e.touches.length > 0 ? e.touches[0].clientX : e.clientX;
+            let clientY = e.touches && e.touches.length > 0 ? e.touches[0].clientY : e.clientY;
+            return { x: (clientX - rect.left) * scaleX, y: (clientY - rect.top) * scaleY };
+        }
+
+        function resetAllEffects() {
+            players.forEach(p => {
+                p.disturbed = false; p.disturbType = null; p.rouletteTimer = 0; p.dLeft = 0; p.score2000Alert = false;
+            });
+        }
+
+        // 경험치 지급 (2레벨이 되는 순간 운명의 펫을 정함)
+        function applyXP(x) {
+            totalXP += x; localStorage.setItem('totalXP', totalXP);
+            if (Math.floor(totalXP / 2000) + 1 === 2) { fatePet = petList[Math.floor(Math.random() * 5)].id; localStorage.setItem('fatePet', fatePet); }
+        }
+
+        function goToMenu() {
+            // 🌐 온라인 대전 중 나가기: 패배 처리 + 상대에게 알림 (나간 쪽은 XP 없음)
+            if (gameState === 'online') {
+                if (!confirm('지금 나가면 패배로 처리돼요. 나갈까요?')) return;
+                netSend({ k: 'leave' });
+            }
+            if (lastGameMode === 'online' && ['online', 'gameOver', 'onlineLink', 'onlineList'].includes(gameState)) {
+                closeOnlineSession();
+            } else if (['solo', 'dual', 'ai', 'paused'].includes(gameState) && ['solo', 'dual', 'ai'].includes(lastGameMode)) {
+                isCountingDown = false;
+                let calculatedXP = 0;
+                if (lastGameMode === 'solo') calculatedXP = Math.floor(players[0].score * 0.2);
+                else if (lastGameMode === 'dual') calculatedXP = Math.floor(((players[0].score + players[1].score) / 2) * 0.15);
+                else if (lastGameMode === 'ai') calculatedXP = Math.floor(players[1].score * 0.15);
+
+                let outXP = Math.floor(calculatedXP * ((180 - timer) / 180));
+
+                if (outXP > 0) { applyXP(outXP); }
+            }
+            isCountingDown = false;
+            resetAllEffects(); notification = { msg: '', timer: 0, color: '#fff' }; gameState = 'menu'; playBgm('menu'); updateUI();
+        }
+
+        function updateUI() {
+            if (['training', 'solo', 'paused'].includes(gameState) && lastGameMode !== 'ai' && lastGameMode !== 'dual' && lastGameMode !== 'online') {
+                if (lastGameMode === 'solo') {
+                    let outXP = Math.floor((players[0].score * 0.2) * ((180 - timer) / 180));
+                    scoreDisplay.innerText = `SCORE: ${players[0].score} (out ${outXP})`;
+                    timeDisplay.innerText = `TIME: ${timer}s`; timeDisplay.style.visibility = 'visible';
+                } else { scoreDisplay.innerText = `SCORE: ${players[0].score}`; timeDisplay.style.visibility = 'hidden'; }
+                mainBtn.style.display = 'block';
+            } else if (gameState === 'dual' || gameState === 'ai' || gameState === 'online' || (gameState === 'paused' && (lastGameMode === 'ai' || lastGameMode === 'dual'))) {
+                let p1Text = gameState === 'ai' || lastGameMode === 'ai' ? '🤖 AI(1P)' : '1P';
+                let p2Text = gameState === 'ai' || lastGameMode === 'ai' ? '👤 YOU(2P)' : '2P';
+                if (gameState === 'online') {
+                    p1Text = onl.names[0] + (onl.myIdx === 0 ? '(나)' : '');
+                    p2Text = onl.names[1] + (onl.myIdx === 1 ? '(나)' : '');
+                }
+
+                if (lastGameMode === 'ai' || lastGameMode === 'dual' || lastGameMode === 'online') {
+                    let calculatedXP = 0;
+                    if (lastGameMode === 'dual' || lastGameMode === 'online') calculatedXP = Math.floor(((players[0].score + players[1].score) / 2) * 0.15);
+                    else if (lastGameMode === 'ai') calculatedXP = Math.floor(players[1].score * 0.15);
+
+                    let outXP = Math.floor(calculatedXP * ((180 - timer) / 180));
+                    scoreDisplay.innerText = `${p1Text}: ${players[0].score} | ${p2Text}: ${players[1].score} (out ${outXP})`;
+                } else {
+                    scoreDisplay.innerText = `${p1Text}: ${players[0].score} | ${p2Text}: ${players[1].score}`;
+                }
+                timeDisplay.innerText = `TIME: ${timer}s`; timeDisplay.style.visibility = 'visible'; mainBtn.style.display = 'block';
+            } else { scoreDisplay.innerText = ""; timeDisplay.style.visibility = 'hidden'; mainBtn.style.display = 'none'; }
+        }
+
+        // ==========================================
+        // 🏁 3초 카운트다운 시작 함수
+        // ==========================================
+        function startMode(mode, opts) {
+            opts = opts || {};
+            gameState = mode; lastGameMode = mode; timer = 180; items = []; resetAllEffects(); spurtAlertDone = false; notification.timer = 0; totalTrainingTime = 0;
+            secFrames = 0;
+            for (let k in trainingStats) { trainingStats[k].spawn = 0; trainingStats[k].hit = 0; }
+            let lv = Math.floor(totalXP / 2000) + 1;
+
+            particles = []; screenShakeTime = 0;
+            globalBadBlockCooldown1P = 0; globalBadBlockCooldown2P = 0;
+
+            simKkikki = (mode === 'online') ? !!opts.kk : isKkikkimong;
+            seedRng(opts.seed != null ? opts.seed : ((Math.random() * 4294967296) >>> 0));
+            const localDrain = (lv >= 6) ? (100 / 13) : 12.5;
+
+            players.forEach(p => { p.pet = null; p.petEnabled = false; p.petBattery = 100; p.activePet = null; p.musicianTimer = 0; p.artistShield = true; p.overheatTimer = 0; p.disturbed = false; p.disturbType = null; p.rouletteTimer = 0; p.dLeft = 0; p.drainRate = localDrain; });
+            if (mode === 'training') { if (lv >= 2) players[0].pet = selectedPet; }
+            else if (mode === 'solo') { if (lv === 2) { players[0].pet = fatePet; notification = { msg: `운명의 펫: ${petList.find(p => p.id === players[0].pet).name}`, timer: 3, color: '#ffeb3b' }; } else if (lv >= 3) players[0].pet = selectedPet; }
+            else if (mode === 'dual') { if (lv >= 9) { players[0].pet = selectedPet; players[1].pet = selectedPet2; } else if (lv >= 3) { players[0].pet = selectedPet; players[1].pet = selectedPet; } }
+            else if (mode === 'ai') { players[0].pet = null; players[1].pet = null; }
+            else if (mode === 'online') {
+                players[0].pet = opts.pets[0]; players[1].pet = opts.pets[1];
+                players[0].drainRate = opts.drain[0]; players[1].drainRate = opts.drain[1];
+            }
+
+            if (mode === 'dual' || mode === 'ai' || mode === 'online') { players[0].area = [0, 300]; players[0].x = 115; players[0].score = 0; players[1].area = [300, 600]; players[1].x = 415; players[1].score = 0; }
+            else { players[0].area = [0, 600]; players[0].x = 265; players[0].score = 0; }
+
+            // 카운트다운 활성화
+            isCountingDown = true;
+            countdownTimer = 3.0;
+            playBgm('game');
+            updateUI();
+        }
+
+        // ==========================================
+        // 🎲 방해공작 룰렛 발동
+        // ==========================================
+        function activateDisturb(player) {
+            if (player.disturbed || player.rouletteTimer > 0) return;
+            playSynthSound('special');
+            player.rouletteTimer = 1.0;
+            let pName = gameState === 'ai' ? (player.id === 1 ? '🤖 AI' : '👤 YOU')
+                          : gameState === 'online' ? onl.names[player.id - 1]
+                          : `${player.id}P`;
+            notification = { msg: `🚨 ${pName} 벌칙 룰렛 가동! 🚨`, timer: 1, color: '#ff4757' };
+        }
+
+        // ==========================================
+        // 🧭 메인 메뉴: 5개 옵션 카드 (그리기 / 클릭 판정이 같은 배열을 사용)
+        // ==========================================
+        const CARD_X = 60, CARD_W = 480, CARD_H = 80;
+        const MENU_CARDS = [
+            { id: 'training', y: 150, icon: '🎯', title: 'TRAINING', desc: '연습 및 트레이닝 리포트 확인', c1: '#11998e', c2: '#38ef7d' },
+            { id: 'solo', y: 240, icon: '☁️', title: 'SOLO PLAY', desc: '최고 점수와 XP 보상에 도전하세요!', c1: '#0052D4', c2: '#6FB1FC', gold: true },
+            { id: 'dual', y: 330, icon: '👥', title: 'OFFLINE DUAL', desc: '한 화면에서 친구와 1대1 대결', c1: '#4e54c8', c2: '#8f94fb' },
+            { id: 'online', y: 420, icon: '🌐', title: 'ONLINE DUAL', desc: '접속 중인 플레이어를 초대해 1대1 대결', c1: '#0e7490', c2: '#22d3ee', badge: 'NEW' },
+            { id: 'ai', y: 510, icon: '🤖', title: 'AI DUAL', desc: '인공지능과 점수 대결 (난이도 선택)', c1: '#8E2DE2', c2: '#4A00E0' }
+        ];
+
+        function drawMenu() {
+            let currentLv = Math.floor(totalXP / 2000) + 1;
+            ctx.fillStyle = "rgba(0, 0, 0, 0.4)"; ctx.beginPath(); ctx.roundRect(40, 20, 520, 45, 10); ctx.fill();
+            ctx.fillStyle = "#FFD700"; ctx.font = "bold 18px sans-serif"; ctx.textAlign = "left"; ctx.fillText(`Lv.${currentLv}`, 60, 48);
+            ctx.fillStyle = "white"; ctx.font = "16px sans-serif"; ctx.fillText(`XP: ${totalXP} / ${currentLv * 2000}`, 130, 48);
+            ctx.fillStyle = "white"; ctx.textAlign = "center"; ctx.font = "bold 46px sans-serif"; ctx.shadowColor = "rgba(0,0,0,0.5)"; ctx.shadowBlur = 8; ctx.fillText("SKY CATCHER", 300, 118); ctx.shadowBlur = 0;
+
+            MENU_CARDS.forEach(c => {
+                let g = ctx.createLinearGradient(CARD_X, c.y, CARD_X + CARD_W, c.y + CARD_H);
+                g.addColorStop(0, c.c1); g.addColorStop(1, c.c2);
+                ctx.fillStyle = g;
+                ctx.strokeStyle = c.gold ? "#FFD700" : "rgba(255,255,255,0.45)"; ctx.lineWidth = c.gold ? 3 : 2;
+                ctx.beginPath(); ctx.roundRect(CARD_X, c.y, CARD_W, CARD_H, 14); ctx.fill(); ctx.stroke();
+
+                ctx.textAlign = "center"; ctx.fillStyle = "white"; ctx.font = "34px sans-serif";
+                ctx.fillText(c.icon, CARD_X + 42, c.y + 52);
+                ctx.textAlign = "left";
+                ctx.font = "bold 24px sans-serif"; ctx.fillText(c.title, CARD_X + 85, c.y + 36);
+                ctx.font = "13px sans-serif"; ctx.fillStyle = "rgba(255,255,255,0.88)"; ctx.fillText(c.desc, CARD_X + 85, c.y + 60);
+
+                if (c.badge) {
+                    ctx.fillStyle = "#facc15"; ctx.beginPath(); ctx.roundRect(CARD_X + CARD_W - 62, c.y + 10, 50, 22, 11); ctx.fill();
+                    ctx.fillStyle = "#422006"; ctx.font = "bold 12px sans-serif"; ctx.textAlign = "center"; ctx.fillText(c.badge, CARD_X + CARD_W - 37, c.y + 26);
+                }
+            });
+
+            ctx.textAlign = "center";
+            ctx.fillStyle = "#ff4757"; ctx.beginPath(); ctx.roundRect(60, 610, 230, 40, 8); ctx.fill(); ctx.fillStyle = "white"; ctx.font = "bold 16px sans-serif"; ctx.fillText(`조작: ${controlType.toUpperCase()}`, 175, 636);
+            if (currentLv >= 3) { ctx.fillStyle = "#9b59b6"; ctx.beginPath(); ctx.roundRect(310, 610, 230, 40, 8); ctx.fill(); ctx.fillStyle = "white"; ctx.font = "bold 16px sans-serif"; ctx.fillText("PET SELECT", 425, 636); }
+            else { ctx.fillStyle = "#555"; ctx.beginPath(); ctx.roundRect(310, 610, 230, 40, 8); ctx.fill(); ctx.fillStyle = "#aaa"; ctx.font = "bold 16px sans-serif"; ctx.fillText("PET SELECT (🔒Lv.3)", 425, 636); }
+
+            ctx.fillStyle = "#6c757d"; ctx.beginPath(); ctx.roundRect(60, 660, 230, 40, 8); ctx.fill(); ctx.fillStyle = "white"; ctx.font = "bold 16px sans-serif"; ctx.fillText("GAME TIP", 175, 686);
+            ctx.fillStyle = "#e67e22"; ctx.beginPath(); ctx.roundRect(310, 660, 230, 40, 8); ctx.fill(); ctx.fillStyle = "white"; ctx.font = "bold 16px sans-serif"; ctx.fillText("SETTINGS", 425, 686);
+            if (isKkikkimong) { ctx.fillStyle = "#FF8C00"; ctx.font = "bold 14px sans-serif"; ctx.textAlign="center"; ctx.fillText("🐵 끼끼몽 에디션 활성화됨", 300, 735); }
+        }
+
+        function drawAIDifficulty() {
+            ctx.fillStyle = "white"; ctx.textAlign="center"; ctx.font = "bold 45px sans-serif"; ctx.fillText("AI 난이도 선택", 300, 100);
+            ctx.fillStyle = "#28a745"; ctx.beginPath(); ctx.roundRect(60, 200, 480, 100, 15); ctx.fill(); ctx.fillStyle = "white"; ctx.font = "bold 30px sans-serif"; ctx.fillText("EASY (쉬움)", 300, 245); ctx.font = "14px sans-serif"; ctx.fillText("AI의 반응속도가 느리고 가끔 멍을 때립니다.", 300, 275);
+            ctx.fillStyle = "#fd7e14"; ctx.beginPath(); ctx.roundRect(60, 330, 480, 100, 15); ctx.fill(); ctx.fillStyle = "white"; ctx.font = "bold 30px sans-serif"; ctx.fillText("NORMAL (보통)", 300, 375); ctx.font = "14px sans-serif"; ctx.fillText("무난한 실력. 막판 스퍼트가 되면 당황합니다.", 300, 405);
+            ctx.fillStyle = "#dc3545"; ctx.beginPath(); ctx.roundRect(60, 460, 480, 100, 15); ctx.fill(); ctx.fillStyle = "white"; ctx.font = "bold 30px sans-serif"; ctx.fillText("HARD (어려움)", 300, 505); ctx.font = "14px sans-serif"; ctx.fillText("완벽한 반사신경과 속도를 자랑합니다.", 300, 535);
+            ctx.fillStyle = "#555"; ctx.fillRect(200, 650, 200, 60); ctx.fillStyle = "white"; ctx.font="bold 22px sans-serif"; ctx.fillText("BACK", 300, 688);
+        }
+
+        function drawPetSelect() {
+            let currentLv = Math.floor(totalXP / 2000) + 1; ctx.fillStyle = "white"; ctx.textAlign="center"; ctx.font = "bold 40px sans-serif"; ctx.fillText("PET SELECT", 300, 70);
+            if (currentLv >= 9) { ctx.fillStyle = (petSelectTarget === 1) ? "#FFD700" : "#444"; ctx.fillRect(150, 90, 140, 30); ctx.fillStyle = (petSelectTarget === 1) ? "#000" : "white"; ctx.font = "bold 16px sans-serif"; ctx.fillText("1P (솔로겸용)", 220, 110); ctx.fillStyle = (petSelectTarget === 2) ? "#00FF7F" : "#444"; ctx.fillRect(310, 90, 140, 30); ctx.fillStyle = (petSelectTarget === 2) ? "#000" : "white"; ctx.fillText("2P (듀얼전용)", 380, 110); }
+            let targetPet = (petSelectTarget === 1) ? selectedPet : selectedPet2;
+            petList.forEach((p, i) => { ctx.fillStyle = (targetPet === p.id) ? ((petSelectTarget === 1) ? "#FFD700" : "#00FF7F") : "#444"; ctx.fillRect(40, 130 + i*100, 520, 85); ctx.fillStyle = (targetPet === p.id) ? "#000" : "white"; ctx.font = "bold 20px sans-serif"; ctx.textAlign = "left"; ctx.fillText(p.name, 60, 160 + i*100); ctx.font = "12px sans-serif"; ctx.fillText(p.desc[0], 60, 185 + i*100); if (p.desc.length > 1) ctx.fillText(p.desc[1], 60, 205 + i*100); });
+            ctx.fillStyle = "#ff4757"; ctx.textAlign="center"; ctx.fillRect(200, 650, 200, 60); ctx.fillStyle = "white"; ctx.font="bold 22px sans-serif"; ctx.fillText("BACK", 300, 688);
+        }
+
+        function drawGameOver() {
+            ctx.fillStyle = "rgba(0,0,0,0.85)"; ctx.fillRect(0,0,600,800); ctx.fillStyle = "white"; ctx.textAlign = "center"; ctx.font = "bold 60px sans-serif"; ctx.fillText("GAME OVER", 300, 300); ctx.font = "bold 24px sans-serif";
+            if (lastGameMode === 'online') {
+                const s0 = players[0].score, s1 = players[1].score, diff = Math.abs(s0 - s1);
+                if (onl.desync) {
+                    ctx.fillStyle = "#f87171"; ctx.fillText("⚠️ 동기화 오류로 대전이 중단됐어요", 300, 380);
+                    ctx.font = "16px sans-serif"; ctx.fillStyle = "#cbd5e1"; ctx.fillText("(이번 대전은 기록되지 않아요)", 300, 415);
+                } else {
+                    let winnerTxt;
+                    if (onl.forfeit === 'opp') winnerTxt = "🏳️ 상대가 나가서 몰수승!";
+                    else if (s0 > s1) winnerTxt = `${onl.names[0]}님이 ${diff}점 차이로 승리!`;
+                    else if (s1 > s0) winnerTxt = `${onl.names[1]}님이 ${diff}점 차이로 승리!`;
+                    else winnerTxt = "무승부입니다!";
+                    ctx.fillText(winnerTxt, 300, 380);
+                    ctx.font = "20px sans-serif"; ctx.fillStyle = "#e2e8f0";
+                    ctx.fillText(`${onl.names[0]} ${s0}점  vs  ${s1}점 ${onl.names[1]}`, 300, 420);
+                    ctx.font = "18px sans-serif"; ctx.fillStyle = "#FFD700"; ctx.fillText(`+${onl.endXP} XP 획득! (현재 레벨: ${Math.floor(totalXP/2000)+1})`, 300, 460);
+                }
+            } else if (lastGameMode === 'dual' || lastGameMode === 'ai') {
+                let diff = Math.abs(players[0].score - players[1].score); let p1Name = lastGameMode === 'ai' ? '🤖 AI' : '1P'; let p2Name = lastGameMode === 'ai' ? '👤 YOU' : '2P';
+                let winnerTxt = (players[0].score > players[1].score) ? `${p1Name}가 ${diff}점 차이로 승리!` : (players[1].score > players[0].score) ? `${p2Name}가 ${diff}점 차이로 승리!` : "무승부입니다!"; ctx.fillText(winnerTxt, 300, 380);
+
+                let xpGained = 0;
+                if (lastGameMode === 'dual') { xpGained = Math.floor(((players[0].score + players[1].score) / 2) * 0.15); }
+                else if (lastGameMode === 'ai') { xpGained = Math.floor(players[1].score * 0.15); }
+
+                ctx.font = "18px sans-serif"; ctx.fillStyle = "#FFD700"; ctx.fillText(`+${xpGained} XP 획득! (현재 레벨: ${Math.floor(totalXP/2000)+1})`, 300, 420);
+            } else {
+                ctx.fillText(`당신의 점수는 ${players[0].score}점입니다!`, 300, 380);
+                if (lastGameMode === 'solo') {
+                    let xpGained = Math.floor(players[0].score * 0.2);
+                    ctx.font = "18px sans-serif"; ctx.fillStyle = "#FFD700"; ctx.fillText(`+${xpGained} XP 획득! (현재 레벨: ${Math.floor(totalXP/2000)+1})`, 300, 420);
+                }
+            }
+            ctx.fillStyle = "#007BFF"; ctx.fillRect(200, 650, 200, 60); ctx.fillStyle = "white"; ctx.font = "bold 20px sans-serif"; ctx.fillText("MENU", 300, 688);
+        }
+
+        function drawBackground(dt) {
+            if (bgTheme === 'sky') { ctx.fillStyle = '#87CEEB'; ctx.fillRect(0, 0, canvas.width, canvas.height); }
+            else if (bgTheme === 'night') { ctx.fillStyle = '#1A1A4D'; ctx.fillRect(0, 0, canvas.width, canvas.height); ctx.fillStyle = '#FFFF80'; starDots.forEach(dot => { ctx.beginPath(); ctx.arc(dot.x, dot.y, dot.size, 0, Math.PI*2); ctx.fill(); dot.y += dot.speed * dt; if(dot.y > 800) dot.y = -10; }); }
+            else if (bgTheme === 'sunset') { let grad = ctx.createLinearGradient(0, 0, 0, 800); grad.addColorStop(0, '#FF8C00'); grad.addColorStop(1, '#FF69B4'); ctx.fillStyle = grad; ctx.fillRect(0, 0, canvas.width, canvas.height); }
+            else if (bgTheme === 'fire') { ctx.fillStyle = '#B22222'; ctx.fillRect(0, 0, canvas.width, canvas.height); ctx.fillStyle = '#FF4500'; fireDots.forEach(dot => { ctx.beginPath(); ctx.arc(dot.x, dot.y, dot.size, 0, Math.PI*2); ctx.fill(); dot.y += dot.speed * dt; if(dot.y > 800) dot.y = -10; }); }
+            else if (bgTheme === 'sea') { let grad = ctx.createLinearGradient(0, 0, 0, 800); grad.addColorStop(0, '#00CED1'); grad.addColorStop(1, '#008080'); ctx.fillStyle = grad; ctx.fillRect(0, 0, canvas.width, canvas.height); ctx.fillStyle = 'rgba(255,255,255,0.5)'; bubbleDots.forEach(dot => { ctx.beginPath(); ctx.arc(dot.x, dot.y, dot.size, 0, Math.PI*2); ctx.fill(); dot.y -= dot.speed * dt; if(dot.y < -10) dot.y = 810; }); }
+            else if (bgTheme === 'rainbow') {
+                let grad = ctx.createLinearGradient(0, 0, 0, 800);
+                grad.addColorStop(0/6, '#FF0000');   // 빨
+                grad.addColorStop(1/6, '#FF7F00');   // 주
+                grad.addColorStop(2/6, '#FFFF00');   // 노
+                grad.addColorStop(3/6, '#00FF00');   // 초
+                grad.addColorStop(4/6, '#0000FF');   // 파
+                grad.addColorStop(5/6, '#4B0082');   // 남
+                grad.addColorStop(6/6, '#8B00FF');   // 보
+                ctx.fillStyle = grad;
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+            }
+        }
+
+        // ==========================================
+        // 📺 카운트다운 드로잉 연출
+        // ==========================================
+        function drawCountdown() {
+            ctx.fillStyle = "rgba(0,0,0,0.6)";
+            ctx.fillRect(0, 0, 600, 800);
+
+            // 숫자 연출 (크게)
+            let secondsLeft = Math.ceil(countdownTimer);
+            ctx.textAlign = "center";
+            ctx.fillStyle = "#FFD700";
+            ctx.shadowColor = "rgba(0,0,0,0.5)";
+            ctx.shadowBlur = 10;
+            ctx.font = "bold 150px sans-serif";
+            ctx.fillText(secondsLeft, 300, 400);
+            ctx.shadowBlur = 0;
+
+            // 하단 팁 영역 배경
+            ctx.fillStyle = "rgba(0,0,0,0.5)";
+            ctx.fillRect(0, 520, 600, 100);
+
+            // 모드별 팁 텍스트 세팅
+            ctx.fillStyle = "white";
+            ctx.textAlign = "center";
+
+            if (gameState === 'training') {
+                ctx.font = "bold 18px sans-serif";
+                ctx.fillText("일시정지로 트레이닝 리포트를 확인해보세요", 300, 575);
+            } else if (gameState === 'solo') {
+                if (countdownTimer > 2.0) {
+                    ctx.font = "bold 18px sans-serif";
+                    ctx.fillText("xp반영 비율=점수*20%", 300, 575);
+                } else {
+                    ctx.font = "bold 20px sans-serif";
+                    ctx.fillText("←→, ↑(pet)로 조작!", 300, 575);
+                }
+            } else if (gameState === 'dual') {
+                if (countdownTimer > 2.0) {
+                    ctx.font = "bold 18px sans-serif";
+                    ctx.fillText("xp반영 비율=두 플레이어 평균 점수*15%", 300, 575);
+                } else {
+                    ctx.font = "bold 18px sans-serif";
+                    ctx.fillText("1p는 ad, w(pet) / 2p는 ←→, ↑(pet)로 조작!", 300, 575);
+                }
+            } else if (gameState === 'ai') {
+                ctx.font = "bold 18px sans-serif";
+                ctx.fillText("xp반영 비율=내 점수*15%", 300, 575);
+            } else if (gameState === 'online') {
+                ctx.font = "bold 18px sans-serif";
+                ctx.fillText(`🌐 온라인 대결! 나는 ${onl.myIdx === 0 ? '왼쪽(1P)' : '오른쪽(2P)'} 칸`, 300, 560);
+                ctx.font = "bold 16px sans-serif";
+                ctx.fillText("←→ 또는 A/D 이동 · ↑ 또는 W 펫 · xp=평균 점수*15%", 300, 592);
+            }
+        }
+
+        function drawGame() {
+            const two = isTwoP();
+            if (two) { ctx.strokeStyle = "rgba(255,255,255,0.5)"; ctx.setLineDash([10, 10]); ctx.beginPath(); ctx.moveTo(300, 0); ctx.lineTo(300, 800); ctx.stroke(); ctx.setLineDash([]); }
+            if (gameState === 'training') { ctx.fillStyle = "white"; ctx.font = "24px sans-serif"; ctx.fillText("⏸️", 565, 30); }
+            players.forEach(p => {
+                if (!two && p.id !== 1) return;
+                if (p.pet) {
+                    let btnX = two ? (p.id === 1 ? 20 : 480) : 20; let btnY = 20; let isOverheated = p.overheatTimer > 0;
+                    ctx.fillStyle = isOverheated ? "#555" : (p.petEnabled ? "#00FF7F" : "#ff4757"); ctx.fillRect(btnX, btnY, 100, 40);
+                    ctx.fillStyle = isOverheated ? "white" : (p.petEnabled ? "#000" : "white"); ctx.font = "bold 15px sans-serif"; ctx.textAlign="center";
+                    let btnTxt = isOverheated ? `과부하 (${Math.ceil(p.overheatTimer)}s)` : (p.petEnabled ? `P${p.id} PET: ON` : `P${p.id} PET: OFF`);
+                    ctx.fillText(btnTxt, btnX + 50, btnY + 25);
+                    ctx.fillStyle = "rgba(0,0,0,0.5)"; ctx.fillRect(btnX, btnY + 45, 100, 8);
+                    if (isOverheated) { ctx.fillStyle = "#ff4757"; ctx.fillRect(btnX, btnY + 45, 100 * (1 - (p.overheatTimer/10)), 8); }
+                    else { ctx.fillStyle = (p.petBattery > 50) ? "#00FF7F" : (p.petBattery > 20) ? "#ffc107" : "#ff4757"; ctx.fillRect(btnX, btnY + 45, 100 * (p.petBattery / 100), 8); }
+                }
+            });
+
+            items.forEach(item => {
+                let isBlind = false;
+                if (two) {
+                    if (item.x < 300 && players[0].disturbed && players[0].disturbType === 'blind') isBlind = true;
+                    if (item.x >= 300 && players[1].disturbed && players[1].disturbType === 'blind') isBlind = true;
+                } else if (gameState === 'solo' || gameState === 'training') {
+                    if (players[0].disturbed && players[0].disturbType === 'blind') isBlind = true;
+                }
+
+                if (isBlind) {
+                    ctx.fillStyle = '#555'; ctx.fillRect(item.x, item.y, item.size, item.size);
+                    ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.strokeRect(item.x, item.y, item.size, item.size);
+                    ctx.fillStyle = '#fff'; ctx.font = `bold ${item.size * 0.6}px sans-serif`; ctx.textAlign = "center";
+                    ctx.fillText("?", item.x + item.size/2, item.y + item.size*0.75);
+                } else {
+                    if (item.type === 'death' && deathImg.complete && deathImg.naturalWidth !== 0) ctx.drawImage(deathImg, item.x, item.y, item.size, item.size); else if (item.type === 'disturb' && disturbImg.complete && disturbImg.naturalWidth !== 0) ctx.drawImage(disturbImg, item.x, item.y, item.size, item.size); else if (item.type === 'lucky' && luckyImg.complete && luckyImg.naturalWidth !== 0) ctx.drawImage(luckyImg, item.x, item.y, item.size, item.size); else if (item.type === 'kkikki' && kkikkimongImg.complete && kkikkimongImg.naturalWidth !== 0) ctx.drawImage(kkikkimongImg, item.x, item.y, item.size, item.size); else if (item.type === 'bomb') { ctx.fillStyle = 'black'; ctx.beginPath(); ctx.arc(item.x+item.size/2, item.y+item.size/2, item.size/2, 0, Math.PI*2); ctx.fill(); } else { ctx.fillStyle = 'white'; ctx.fillRect(item.x, item.y, item.size, item.size); }
+                }
+            });
+
+            players.forEach(p => {
+                if (!two && p.id !== 1) return;
+
+                ctx.fillStyle = (p.disturbed && p.disturbType === 'stop') ? '#555' : p.color;
+                ctx.fillRect(p.x, p.y, p.w, p.h);
+
+                if (gameState === 'online' && p.id === onl.myIdx + 1) {   // 🌐 내 패들 표시
+                    ctx.fillStyle = "#fff"; ctx.font = "bold 12px sans-serif"; ctx.textAlign = "center";
+                    ctx.fillText("▲ YOU", p.x + p.w/2, p.y + 38);
+                }
+
+                if (p.activePet) {
+                    ctx.fillStyle = "white"; ctx.font = "12px sans-serif"; ctx.textAlign="center"; let petName = petList.find(pt => pt.id === p.activePet).name; ctx.fillText(petName, p.x + p.w/2, p.y - 10);
+                }
+
+                if (p.disturbed && p.disturbType === 'stop') {
+                    ctx.save(); let centerX = p.x + p.w / 2; let centerY = p.y + p.h / 2; let grad = ctx.createRadialGradient(centerX, centerY, 30, centerX, centerY, 150); grad.addColorStop(0, "rgba(0,0,0,0)"); grad.addColorStop(1, "rgba(0,0,0,0.9)"); ctx.fillStyle = grad; ctx.fillRect(p.area[0], 0, p.area[1] - p.area[0], 800); ctx.restore();
+                }
+
+                if (p.disturbed && p.disturbType === 'reverse') {
+                    ctx.fillStyle = '#ff4757'; ctx.font = "bold 14px sans-serif"; ctx.textAlign="center"; ctx.fillText("↔ 반전됨 ↔", p.x + p.w/2, p.y - 25);
+                }
+
+                if (p.rouletteTimer > 0) {
+                    ctx.fillStyle = (Math.floor(Date.now() / 100) % 2 === 0) ? '#ff4757' : '#fff';
+                    ctx.font = "bold 16px sans-serif"; ctx.textAlign = "center";
+                    let rouletteTexts = ['시야차단?', '좌우반전?', '블라인드?'];
+                    let rt = rouletteTexts[Math.floor(Date.now() / 50) % 3];
+                    ctx.fillText(`🎲 ${rt}`, p.x + p.w/2, p.y - 25);
+                }
+            });
+
+            particles.forEach(p => { ctx.save(); ctx.globalAlpha = Math.max(0, p.life); ctx.fillStyle = p.color; ctx.beginPath(); if (p.type === 'star') { ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2); } else { ctx.arc(p.x, p.y, p.size * (2.5 - p.life), 0, Math.PI * 2); } ctx.fill(); ctx.restore(); });
+            if (controlType === 'mobile') { ctx.globalAlpha = 0.5; ctx.fillStyle = "#444"; ctx.fillRect(15, 705, 80, 80); ctx.fillRect(505, 705, 80, 80); ctx.globalAlpha = 1; }
+
+            // 카운트다운 연출 그리기
+            if (isCountingDown) {
+                drawCountdown();
+            }
+
+            // 🌐 상대 응답 대기 안내
+            if (gameState === 'online' && onl.started) drawOnlineStall();
+
+            if (gameState === 'paused') { ctx.fillStyle = "rgba(0,0,0,0.85)"; ctx.fillRect(0,0,600,800); ctx.fillStyle = "white"; ctx.textAlign = "center"; ctx.font = "bold 40px sans-serif"; ctx.fillText("PAUSED", 300, 150); ctx.font = "20px sans-serif"; ctx.fillText(`⏱️ 총 플레이 시간: ${Math.floor(totalTrainingTime)}초`, 300, 200); ctx.fillText("── 트레이닝 리포트 ──", 300, 250); let yPos = 300; for (let k in trainingStats) { const s = trainingStats[k]; const rate = s.spawn > 0 ? Math.round((s.hit / s.spawn) * 100) : 0; ctx.textAlign = "left"; ctx.fillText(`${s.label}: ${s.hit} / ${s.spawn} (${rate}%)`, 180, yPos); yPos += 40; } ctx.textAlign = "center"; ctx.fillStyle = "#28a745"; ctx.fillRect(200, 600, 200, 50); ctx.fillStyle = "white"; ctx.fillText("계속하기 (ESC)", 300, 632); }
+        }
+
+        function draw(dt) {
+            if (gameState === 'intro') {
+                const t = Math.min(1, introProgress / 100);
+                const ease = 1 - Math.pow(1 - t, 3);
+                const pulse = 1 + Math.sin(t * Math.PI) * 0.08;
+
+                // 짧고 강렬한 네온 플래시 인트로
+                const bg = ctx.createLinearGradient(0, 0, 600, 800);
+                bg.addColorStop(0, '#050817');
+                bg.addColorStop(0.55, '#101b3d');
+                bg.addColorStop(1, '#03040b');
+                ctx.fillStyle = bg;
+                ctx.fillRect(0, 0, 600, 800);
+
+                ctx.save();
+                ctx.globalAlpha = 0.25 + ease * 0.45;
+                ctx.translate(300, 390);
+                ctx.rotate(-0.22);
+                const streak = ctx.createLinearGradient(-600, 0, 600, 0);
+                streak.addColorStop(0, 'rgba(0,220,255,0)');
+                streak.addColorStop(0.48, 'rgba(0,220,255,0.05)');
+                streak.addColorStop(0.52, 'rgba(255,215,0,0.8)');
+                streak.addColorStop(1, 'rgba(0,220,255,0)');
+                ctx.fillStyle = streak;
+                ctx.fillRect(-600 + ease * 180, -90, 1200, 180);
+                ctx.restore();
+
+                ctx.save();
+                ctx.globalAlpha = Math.min(1, introAlpha);
+                ctx.translate(300, 365);
+                ctx.scale(pulse, pulse);
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.font = '900 58px sans-serif';
+                ctx.shadowColor = '#00d9ff';
+                ctx.shadowBlur = 28;
+                ctx.fillStyle = '#ffffff';
+                ctx.fillText('SKY', 0, -32);
+                ctx.shadowColor = '#ffd700';
+                ctx.shadowBlur = 24;
+                ctx.fillStyle = '#ffd700';
+                ctx.fillText('CATCHER', 0, 32);
+                ctx.restore();
+
+                // 로고 아래 빠르게 차오르는 에너지 라인
+                const barW = 320;
+                const barX = 140;
+                const barY = 455;
+                ctx.fillStyle = 'rgba(255,255,255,0.16)';
+                ctx.beginPath();
+                ctx.roundRect(barX, barY, barW, 5, 3);
+                ctx.fill();
+                const energy = ctx.createLinearGradient(barX, 0, barX + barW, 0);
+                energy.addColorStop(0, '#00d9ff');
+                energy.addColorStop(0.55, '#ffffff');
+                energy.addColorStop(1, '#ffd700');
+                ctx.fillStyle = energy;
+                ctx.shadowColor = '#00d9ff';
+                ctx.shadowBlur = 14;
+                ctx.beginPath();
+                ctx.roundRect(barX, barY, barW * ease, 5, 3);
+                ctx.fill();
+                ctx.shadowBlur = 0;
+
+                ctx.globalAlpha = 0.75;
+                ctx.fillStyle = '#dbeafe';
+                ctx.font = 'bold 13px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText('GET READY TO CATCH THE SKY', 300, 495);
+                ctx.restore();
+                return;
+            }
+
+            ctx.save();
+            if (screenShakeTime > 0 && ['training', 'solo', 'dual', 'ai', 'online'].includes(gameState)) {
+                let dx = (Math.random() - 0.5) * 20; let dy = (Math.random() - 0.5) * 20; ctx.translate(dx, dy);
+            }
+            drawBackground(dt);
+            if (gameState === 'menu') drawMenu(); else if (gameState === 'aiDifficulty') drawAIDifficulty(); else if (gameState === 'petSelect') drawPetSelect(); else if (gameState === 'help') drawHelp(); else if (gameState === 'setting') drawSetting(); else if (gameState === 'onlineList' || gameState === 'onlineLink') drawOnlineList(); else if (['training', 'solo', 'dual', 'ai', 'paused', 'online'].includes(gameState)) drawGame(); else if (gameState === 'gameOver') drawGameOver();
+            ctx.restore();
+
+            if (notification.timer > 0) { ctx.save(); ctx.beginPath(); ctx.roundRect(100, 20, 400, 45, 22.5); ctx.fillStyle = "rgba(0,0,0,0.8)"; ctx.fill(); ctx.fillStyle = notification.color; ctx.textAlign = "center"; ctx.font = "bold 18px sans-serif"; ctx.fillText(notification.msg, 300, 48); ctx.restore(); }
+        }
+
+        // ==========================================
+        // 🔁 메인 루프: 고정 스텝(1/60초)으로만 게임 로직 진행
+        //   - 온라인 대전은 상대 입력이 도착해야 한 스텝씩 진행(락스텝)
+        // ==========================================
+        function gameLoop(timestamp) {
+            if (!lastTimestamp) lastTimestamp = timestamp;
+            let dt = (timestamp - lastTimestamp) / 1000; if (dt > 0.1) dt = 0.016; lastTimestamp = timestamp;
+
+            onlineTick();
+
+            acc += dt;
+            let steps = 0, blocked = false;
+            while (acc >= STEP && steps < 6) {
+                if (!stepSim()) { blocked = true; break; }
+                acc -= STEP; steps++;
+            }
+            if (acc > STEP * 6) acc = STEP * 6;
+
+            if (gameState === 'online' && onl.started) {
+                if (blocked) onl.stallMs += dt * 1000; else if (steps > 0) onl.stallMs = 0;
+                if (onl.stallMs > STALL_LIMIT_MS) opponentGone();
+            }
+
+            draw(dt);
+            requestAnimationFrame(gameLoop);
+        }
+
+        let trainingStats = { gold: { spawn: 0, hit: 0, label: '✨ 기본 블록' }, bomb: { spawn: 0, hit: 0, label: '💣 폭탄 블록' }, death: { spawn: 0, hit: 0, label: '💀 데스 블록' }, lucky: { spawn: 0, hit: 0, label: '🍀 행운 블록' }, disturb: { spawn: 0, hit: 0, label: '🌀 방해 블록' }, kkikki: { spawn: 0, hit: 0, label: '🐵 끼끼몽 블록' } };
+
+        function togglePause() {
+            if (isCountingDown) return; // 카운트다운 중 일시정지 비활성화
+            if (gameState === 'training') { gameState = 'paused'; bgmGame.pause(); } else if (gameState === 'paused') { gameState = 'training'; globalVolume > 0 ? bgmGame.play().catch(()=>{}) : null; }
+        }
+
+        function handleSpawning(dt) {
+            let two = isTwoP();
+            let timeDifficultyMod = (gameState !== 'training') ? (1.0 + (180 - timer) / 180 * 0.4) : 1;
+            let spawnPumping = (gameState !== 'training' && timer <= 10) ? 1.5 : 1;
+
+            if (globalBadBlockCooldown1P > 0) globalBadBlockCooldown1P -= dt;
+            if (globalBadBlockCooldown2P > 0) globalBadBlockCooldown2P -= dt;
+
+            let probLuckyMod = (players[0].activePet === 'walker' || (two && players[1].activePet === 'walker')) ? 5 : 1;
+
+            if (two) {
+                let rewardRoll = rnd() / (spawnPumping * timeDifficultyMod);
+                let limitLucky = 0.0012 * probLuckyMod;
+                let limitKkikki = limitLucky * 2;
+
+                if (rewardRoll < 0.075) {
+                    items.push({ x: rnd() * (300 - 20), y: -60, size: 20, type: 'gold', speed: 300 });
+                    items.push({ x: 300 + rnd() * (300 - 20), y: -60, size: 20, type: 'gold', speed: 300 });
+                } else if (rewardRoll < 0.075 + limitLucky) {
+                    items.push({ x: rnd() * (300 - 45), y: -60, size: 45, type: 'lucky', speed: 720 });
+                    items.push({ x: 300 + rnd() * (300 - 45), y: -60, size: 45, type: 'lucky', speed: 720 });
+                } else if (simKkikki && rewardRoll < 0.075 + limitKkikki) {
+                    items.push({ x: rnd() * (300 - 45), y: -60, size: 45, type: 'kkikki', speed: 720 });
+                    items.push({ x: 300 + rnd() * (300 - 45), y: -60, size: 45, type: 'lucky', speed: 720 });
+                }
+
+                let badRoll = rnd() / (spawnPumping * timeDifficultyMod);
+                if (badRoll < 0.05) {
+                    if (globalBadBlockCooldown1P <= 0) {
+                        let subRoll = rnd();
+                        if (subRoll < 0.5) { items.push({ x: rnd() * (300 - 25), y: -60, size: 25, type: 'bomb', speed: 300 }); }
+                        else if (subRoll < 0.8) { items.push({ x: rnd() * (300 - 40), y: -60, size: 40, type: 'disturb', speed: 240 }); }
+                        else { items.push({ x: rnd() * (300 - 60), y: -60, size: 60, type: 'death', speed: 240 }); }
+                    }
+                    if (globalBadBlockCooldown2P <= 0) {
+                        let subRoll = rnd();
+                        if (subRoll < 0.5) { items.push({ x: 300 + rnd() * (300 - 25), y: -60, size: 25, type: 'bomb', speed: 300 }); }
+                        else if (subRoll < 0.8) { items.push({ x: 300 + rnd() * (300 - 40), y: -60, size: 40, type: 'disturb', speed: 240 }); }
+                        else { items.push({ x: 300 + rnd() * (300 - 60), y: -60, size: 60, type: 'death', speed: 240 }); }
+                    }
+                    if (globalBadBlockCooldown1P <= 0) globalBadBlockCooldown1P = 0.5 + rnd() * 0.4;
+                    if (globalBadBlockCooldown2P <= 0) globalBadBlockCooldown2P = 0.5 + rnd() * 0.4;
+                }
+
+            } else {
+                let rewardRoll = rnd() / (spawnPumping * timeDifficultyMod);
+                let limitLucky = 0.0015 * probLuckyMod;
+
+                if (rewardRoll < 0.09) {
+                    items.push({ x: rnd() * (600 - 20), y: -60, size: 20, type: 'gold', speed: 300 });
+                    if (gameState === 'training') trainingStats.gold.spawn++;
+                } else if (rewardRoll < 0.09 + limitLucky) {
+                    items.push({ x: rnd() * (600 - 45), y: -60, size: 45, type: 'lucky', speed: 720 });
+                    if (gameState === 'training') trainingStats.lucky.spawn++;
+                } else if (simKkikki && rewardRoll < 0.09 + (limitLucky * 2)) {
+                    items.push({ x: rnd() * (600 - 45), y: -60, size: 45, type: 'kkikki', speed: 720 });
+                    if (gameState === 'training') trainingStats.kkikki.spawn++;
+                }
+
+                if (globalBadBlockCooldown1P <= 0) {
+                    let badRoll = rnd() / (spawnPumping * timeDifficultyMod);
+                    if (badRoll < 0.055) {
+                        let subRoll = rnd();
+                        if (subRoll < 0.55) {
+                            items.push({ x: rnd() * (600 - 25), y: -60, size: 25, type: 'bomb', speed: 300 });
+                            if (gameState === 'training') trainingStats.bomb.spawn++;
+                        } else if (subRoll < 0.80) {
+                            items.push({ x: rnd() * (600 - 40), y: -60, size: 40, type: 'disturb', speed: 240 });
+                            if (gameState === 'training') trainingStats.disturb.spawn++;
+                        } else {
+                            items.push({ x: rnd() * (600 - 60), y: -60, size: 60, type: 'death', speed: 240 });
+                            if (gameState === 'training') trainingStats.death.spawn++;
+                        }
+                        globalBadBlockCooldown1P = 0.5 + rnd() * 0.4;
+                    }
+                }
+            }
+        }
+
+        // ==========================================
+        // ⚙️ 게임 로직 1스텝 (dt 는 항상 1/60초)
+        //   ※ 여기서는 Math.random / Date.now / setTimeout 을 쓰지 않는다 (온라인 동기화 보장)
+        // ==========================================
+        function update(dt) {
+            if (gameState === 'intro') {
+                introTimer -= dt;
+                if (introAlpha < 1) introAlpha = Math.min(1, introAlpha + dt * 3.5);
+                introProgress = Math.min(100, ((0.85 - introTimer) / 0.85) * 100);
+                if (introTimer <= 0) { gameState = 'menu'; updateBgmVolume(); playBgm('menu'); updateUI(); }
+                return;
+            }
+            if (gameState === 'paused' || !['training', 'solo', 'dual', 'ai', 'online'].includes(gameState)) return;
+
+            // 카운트다운 중에는 게임 내 모든 움직임을 정지
+            if (isCountingDown) {
+                countdownTimer -= dt;
+                if (countdownTimer <= 0) {
+                    isCountingDown = false;
+                    secFrames = 0;
+                }
+                return;
+            }
+
+            for (let i = particles.length - 1; i >= 0; i--) {
+                let p = particles[i];
+                p.x += p.vx * dt;
+                p.y += p.vy * dt;
+                p.life -= dt * (p.type === 'smoke' ? 1.4 : 1.8);
+                if (p.life <= 0) particles.splice(i, 1);
+            }
+            if (screenShakeTime > 0) screenShakeTime -= dt;
+
+            let timeDifficultyMod = (gameState !== 'training') ? (1.0 + (180 - timer) / 180 * 0.4) : 1;
+            let speedMultiplier = (gameState !== 'training' && timer <= 10) ? 2 : 1;
+            if (gameState !== 'training' && timer <= 10) { if(bgmGame.playbackRate !== 2.0) bgmGame.playbackRate = 2.0; } else { if(bgmGame.playbackRate !== 1.0) bgmGame.playbackRate = 1.0; }
+
+            if (gameState === 'training') totalTrainingTime += dt;
+
+            const two = isTwoP();
+            const sideScoped = (gameState === 'dual' || gameState === 'online');   // 펫 효과가 자기 칸에만 적용되는 모드
+            const inp = (gameState === 'online' && onl.cur) ? onl.cur : null;       // 🌐 이번 프레임의 두 플레이어 입력
+
+            players.forEach((p, i) => {
+                if (!two && p.id !== 1) return;
+
+                // 방해 효과 남은 시간 (setTimeout 대신 프레임 기반)
+                if (p.disturbed) {
+                    p.dLeft -= dt;
+                    if (p.dLeft <= 0) { p.disturbed = false; p.disturbType = null; p.dLeft = 0; }
+                }
+
+                if (p.rouletteTimer > 0) {
+                    p.rouletteTimer -= dt;
+                    if (p.rouletteTimer <= 0) {
+                        p.rouletteTimer = 0;
+                        p.disturbed = true;
+
+                        let r = rnd();
+                        if (r < 0.33) p.disturbType = 'stop';
+                        else if (r < 0.66) p.disturbType = 'reverse';
+                        else p.disturbType = 'blind';
+
+                        let duration = Math.floor(rnd() * 5) + 3;
+                        p.dLeft = duration;
+                        let penaltyName = p.disturbType === 'stop' ? '시야차단+정지' : (p.disturbType === 'reverse' ? '조작 좌우반전' : '전체 블라인드');
+
+                        let pName = gameState === 'ai' ? (p.id === 1 ? '🤖 AI' : '👤 YOU') : `${p.id}P`;
+                        notification = { msg: `💥 [${penaltyName}] ${pName} 적용!`, timer: 2, color: '#ff4757' };
+                        playSynthSound('bomb');
+                    }
+                }
+
+                // 🌐 온라인: 펫 켜기/끄기 입력은 여기서 처리해야 양쪽이 같은 프레임에 반영됨
+                if (inp && inp[i].p && p.pet && p.overheatTimer <= 0) {
+                    p.petEnabled = !p.petEnabled;
+                    if (i === onl.myIdx) playSynthSound('collect');
+                }
+
+                if (p.pet) {
+                    if (p.petEnabled && p.petBattery > 0) {
+                        p.activePet = p.pet; if (p.activePet !== 'artist') p.petBattery -= p.drainRate * dt;
+                        if (p.petBattery <= 0) { p.petBattery = 0; p.petEnabled = false; p.activePet = null; p.overheatTimer = 5 + rnd() * 5; notification = { msg: `🔋 ${p.id}P 펫 방전! 과부하 발생!`, timer: 2, color: '#ff4757' }; playSynthSound('bomb'); }
+                    } else {
+                        p.activePet = null; if (p.overheatTimer > 0) { p.overheatTimer -= dt; if (p.overheatTimer <= 0) p.overheatTimer = 0; } else if (p.petBattery < 100) { p.petBattery += 8 * dt; if (p.petBattery >= 100) { p.petBattery = 100; if (p.pet === 'artist' && !p.artistShield) { p.artistShield = true; notification = { msg: `🎨 ${p.id}P 방어막 재생성 완료!`, timer: 2, color: '#00d2ff' }; } } }
+                    }
+                    if (p.activePet === 'musician') {
+                        p.musicianTimer += dt;
+                        if (p.musicianTimer >= 5) {
+                            items = items.filter(it => { if (it.type !== 'bomb' && it.type !== 'death' && it.type !== 'disturb') return true; if (sideScoped) { if (p.id === 1 && it.x < 300) return false; if (p.id === 2 && it.x >= 300) return false; } else return false; return true; });
+                            notification = { msg: `🎵 ${p.id}P 정화 발동!`, timer: 1, color: '#00d2ff' }; playSynthSound('special'); p.musicianTimer = 0;
+                        }
+                    } else p.musicianTimer = 0;
+                }
+
+                if (!p.score2000Alert && p.score >= 2000) { notification = { msg: `🎊 ${p.id}P 2000점 돌파! 🎊`, timer: 3, color: '#00FF7F' }; p.score2000Alert = true; }
+
+                if ((p.disturbed && p.disturbType === 'stop') || (gameState === 'ai' && i === 0)) return;
+
+                let move = 0;
+                if (gameState === 'dual') { if (i === 0) move = (keys['KeyA'] ? -1 : keys['KeyD'] ? 1 : 0); else move = (keys['ArrowLeft'] ? -1 : keys['ArrowRight'] ? 1 : 0); }
+                else if (gameState === 'online') { move = inp ? inp[i].m : 0; }
+                else if (gameState === 'ai') { if (i === 1) move = (controlType === 'pc' ? (keys['ArrowLeft'] ? -1 : keys['ArrowRight'] ? 1 : 0) : mobileMove); }
+                else move = (controlType === 'pc' ? (keys['ArrowLeft'] ? -1 : keys['ArrowRight'] ? 1 : 0) : mobileMove);
+
+                if (p.disturbed && p.disturbType === 'reverse') { move *= -1; }
+
+                p.x += move * p.speed * dt; if (p.x < p.area[0]) p.x = p.area[0]; if (p.x > p.area[1] - p.w) p.x = p.area[1] - p.w;
+            });
+
+            // 남은 시간: Date.now 대신 60프레임 = 1초 로 계산
+            if (gameState !== 'training') {
+                if (timer === 15 && !spurtAlertDone) { notification = { msg: "5초 뒤 막판 스퍼트!", timer: 2, color: '#ffc107' }; spurtAlertDone = true; }
+                if (timer === 10 && notification.msg !== "막판 스퍼트 진행중!") notification = { msg: "막판 스퍼트 진행중!", timer: 3, color: '#00FF7F' };
+                secFrames++;
+                if (secFrames >= 60) {
+                    secFrames -= 60;
+                    timer--; updateUI();
+                    if (timer <= 0) {
+                        if (['solo', 'dual', 'ai', 'online'].includes(lastGameMode)) {
+                            let xpGained = 0;
+                            if (lastGameMode === 'solo') xpGained = Math.floor(players[0].score * 0.2);
+                            else if (lastGameMode === 'dual' || lastGameMode === 'online') xpGained = Math.floor(((players[0].score + players[1].score) / 2) * 0.15);
+                            else if (lastGameMode === 'ai') xpGained = Math.floor(players[1].score * 0.15);
+
+                            if (lastGameMode === 'online') onl.endXP = xpGained;
+                            applyXP(xpGained);
+                        }
+                        playBgm('stop'); gameState = 'gameOver';
+                    }
+                }
+            }
+
+            if (gameState === 'ai') {
+                let p1 = players[0];
+
+                if (!(p1.disturbed && p1.disturbType === 'stop')) {
+                    let targetX = p1.x + p1.w/2; let found = false; let minY = -100;
+                    for (let item of items) {
+                        if (item.x < 300 && item.y > minY && item.y < p1.y + p1.h) {
+                            let dist = p1.y - item.y;
+                            if (dist > 0) {
+                                if (aiDifficulty === 'easy' && dist > 350) continue;
+                                if (aiDifficulty === 'normal' && timer > 10 && dist > 550) continue;
+                                if (aiDifficulty === 'normal' && timer <= 10 && dist > 250) continue;
+                                let isBad = ['bomb', 'death', 'disturb'].includes(item.type);
+                                if (aiDifficulty === 'easy' && isBad && rnd() < 0.05) continue;
+                                if (isBad) { if (item.x + item.size > p1.x && item.x < p1.x + p1.w) { targetX = p1.x > 150 ? 50 : 250; found = true; minY = item.y; } }
+                                else { targetX = item.x + item.size/2; found = true; minY = item.y; }
+                            }
+                        }
+                    }
+                    let diffX = targetX - (p1.x + p1.w/2); let move = 0; if (Math.abs(diffX) > 10) move = diffX > 0 ? 1 : -1;
+                    let speedMod = aiDifficulty === 'hard' ? 1.0 : (aiDifficulty === 'normal' ? 0.75 : 0.5);
+                    if (aiDifficulty === 'easy' && rnd() < 0.05) move = 0;
+                    if (aiDifficulty === 'normal' && timer <= 10 && rnd() < 0.1) move = move === 1 ? -1 : 1;
+
+                    if (p1.disturbed && p1.disturbType === 'reverse') { move *= -1; }
+
+                    p1.x += move * p1.speed * speedMod * dt;
+                    if (p1.x < p1.area[0]) p1.x = p1.area[0]; if (p1.x > p1.area[1] - p1.w) p1.x = p1.area[1] - p1.w;
+                }
+            }
+
+            handleSpawning(dt);
+
+            for (let i = items.length - 1; i >= 0; i--) {
+                items[i].y += items[i].speed * speedMultiplier * timeDifficultyMod * dt;
+                players.forEach(p => {
+                    if (!two && p.id !== 1) return;
+                    if (!items[i]) return;
+                    if (p.activePet === 'scientist' && items[i].type === 'gold' && Math.abs(items[i].y - p.y) < 200) { if (sideScoped) { if ((p.id === 1 && items[i].x < 300) || (p.id === 2 && items[i].x >= 300)) { if (items[i].x < p.x + p.w/2) items[i].x += 5; else items[i].x -= 5; } } else { if (items[i].x < p.x + p.w/2) items[i].x += 5; else items[i].x -= 5; } }
+
+                    if (items[i] && items[i].x < p.x + p.w && items[i].x + items[i].size > p.x && items[i].y < p.y + p.h && items[i].y + items[i].size > p.y) {
+                        const type = items[i].type; if (gameState === 'training') trainingStats[type].hit++;
+                        let cx = items[i].x + items[i].size/2; let cy = items[i].y + items[i].size/2;
+
+                        if (type === 'gold') { p.score += 10; playSynthSound('collect'); createParticles(cx, cy, '#FFD700', 12, 'star'); }
+                        else if (type === 'bomb') { let pen = p.activePet === 'mathematician' ? 4 : 20; p.score = Math.max(0, p.score - pen); playSynthSound('bomb'); createParticles(cx, cy, '#888888', 16, 'smoke'); screenShakeTime = 0.2; }
+                        else if (type === 'death') { let pen = p.activePet === 'mathematician' ? 20 : 100; p.score = Math.max(0, p.score - pen); playSynthSound('bomb'); createParticles(cx, cy, '#FF4500', 32, 'smoke'); screenShakeTime = 0.4; }
+                        else if (type === 'disturb') {
+                            if (p.activePet === 'artist' && p.artistShield) {
+                                p.artistShield = false; p.petBattery = 0; p.petEnabled = false; p.activePet = null; p.overheatTimer = 5 + rnd() * 5;
+                                notification = { msg: `🎨 ${p.id}P 방어 성공! (과부하 발생)`, timer: 2, color: '#ffc107' }; playSynthSound('special'); createParticles(cx, cy, '#00d2ff', 20, 'star');
+                            } else { activateDisturb(p); createParticles(cx, cy, '#8A2BE2', 16, 'smoke'); }
+                        }
+                        else if (type === 'lucky') { p.score += 200; playSynthSound('special'); createParticles(cx, cy, '#00FF7F', 25, 'star'); }
+                        else if (type === 'kkikki') { if (p.score >= 1000) { p.score = Math.round(p.score / 1000) * 1000; } else { p.score = Math.round(p.score / 100) * 100; } playSynthSound('special'); notification = { msg: `🐵 끼끼몽 효과! 점수 반올림!`, timer: 2, color: '#FF8C00' }; createParticles(cx, cy, '#FF8C00', 25, 'star'); }
+                        items.splice(i, 1); updateUI();
+                    }
+                });
+                if (items[i] && items[i].y > canvas.height) items.splice(i, 1);
+            }
+            if (notification.timer > 0) notification.timer -= dt;
+        }
+
+        function drawHelp() { if (tipImg.complete) ctx.drawImage(tipImg, 0, 0, 600, 800); ctx.fillStyle = "#ff4757"; ctx.fillRect(480, 10, 110, 40); ctx.fillStyle = "white"; ctx.textAlign = "center"; ctx.font = "bold 16px sans-serif"; ctx.fillText("BACK", 535, 36); }
+        function drawSetting() {
+            ctx.fillStyle = "white"; ctx.textAlign = "center"; ctx.font = "bold 45px sans-serif"; ctx.fillText("SETTING", 300, 80); let currentLv = Math.floor(totalXP / 2000) + 1;
+            const themes = [ { y: 110, id: 'sky', txt: "하늘 (기본)", col: "#87CEEB", minLv: 1 }, { y: 170, id: 'night', txt: `밤 ${currentLv<4?'(🔒Lv.4)':''}`, col: "#1A1A4D", minLv: 4 }, { y: 230, id: 'sunset', txt: `노을 ${currentLv<5?'(🔒Lv.5)':''}`, col: "#FF69B4", minLv: 5 }, { y: 290, id: 'fire', txt: `불덩이 ${currentLv<7?'(🔒Lv.7)':''}`, col: "#B22222", minLv: 7 }, { y: 350, id: 'sea', txt: `바다 ${currentLv<8?'(🔒Lv.8)':''}`, col: "#00CED1", minLv: 8 }, { y: 410, id: 'rainbow', txt: `무지개 ${currentLv<10?'(🔒Lv.10)':''}`, col: "rainbow", minLv: 10 } ];
+            themes.forEach(t => {
+                let isLocked = currentLv < t.minLv;
+                ctx.fillStyle = (bgTheme === t.id) ? "white" : "rgba(255,255,255,0.3)";
+                ctx.fillRect(145, t.y-5, 310, 60);
+                if (isLocked) {
+                    ctx.fillStyle = "#555";
+                    ctx.fillRect(150, t.y, 300, 50);
+                } else if (t.id === 'rainbow') {
+                    let rGrad = ctx.createLinearGradient(150, 0, 450, 0);
+                    rGrad.addColorStop(0/6, '#FF0000');
+                    rGrad.addColorStop(1/6, '#FF7F00');
+                    rGrad.addColorStop(2/6, '#FFFF00');
+                    rGrad.addColorStop(3/6, '#00FF00');
+                    rGrad.addColorStop(4/6, '#0000FF');
+                    rGrad.addColorStop(5/6, '#4B0082');
+                    rGrad.addColorStop(6/6, '#8B00FF');
+                    ctx.fillStyle = rGrad;
+                    ctx.fillRect(150, t.y, 300, 50);
+                } else {
+                    ctx.fillStyle = t.col;
+                    ctx.fillRect(150, t.y, 300, 50);
+                }
+                ctx.fillStyle = isLocked ? "#aaa" : "white";
+                ctx.font = "bold 20px sans-serif";
+                ctx.fillText(t.txt, 300, t.y + 32);
+            });
+            ctx.fillStyle = "white"; ctx.font = "bold 24px sans-serif"; ctx.fillText("SOUND VOLUME", 300, 510);
+            const volButtons = [ { x: 50, vol: 0, txt: "무음" }, { x: 150, vol: 0.05, txt: "25%" }, { x: 250, vol: 0.1, txt: "50%" }, { x: 350, vol: 0.15, txt: "75%" }, { x: 450, vol: 0.2, txt: "100%" } ];
+            volButtons.forEach(v => { const isActive = Math.abs(globalVolume - v.vol) < 0.01; ctx.fillStyle = isActive ? "white" : "#444"; ctx.fillRect(v.x, 530, 90, 50); ctx.fillStyle = isActive ? "#222" : "white"; ctx.font = "bold 18px sans-serif"; ctx.fillText(v.txt, v.x + 45, 562); });
+            ctx.fillStyle = "#ff4757"; ctx.fillRect(200, 650, 200, 60); ctx.fillStyle = "white"; ctx.font = "bold 22px sans-serif"; ctx.fillText("BACK", 300, 688);
+        }
+
+        // ==========================================
+        // 🌐 온라인 듀얼
+        //   [상태 흐름]  menu → onlineList(목록) → 초대/수락 → onlineLink(직접 연결·핸드셰이크)
+        //                → online(락스텝 대전) → gameOver
+        //   [통신]       게임 ↔ minigame.html ↔ 메인 월드(sketch.js) 로 postMessage 중계
+        //                - 초대/응답/상태: 내 players 상태 필드(scOn, scMatch, inv, rep)로 방 전체에 공유
+        //                - 대전 입력: 두 사람이 직접 연결한 채널(SC_SEND / SC_DATA)
+        // ==========================================
+        const inFrame = () => window.parent !== window;
+        function toMain(msg) { if (inFrame()) { try { window.parent.postMessage(msg, '*'); } catch (e) {} } }
+        function netSend(obj) { toMain({ type: 'SC_SEND', data: obj }); }
+
+        const IN_DELAY = 10;                 // 입력 지연 프레임 (상대 입력이 도착할 시간을 벌어 줌)
+        const INVITE_TIMEOUT = 15000;       // 초대 응답 대기 시간
+        const DECLINE_COOLDOWN = 10000;     // 거절당한 상대를 목록에서 흐리게 처리하는 시간
+        const LINK_TIMEOUT = 15000;         // 직접 연결 시도 제한 시간
+        const STALL_WARN_MS = 2500;         // 상대 입력이 이만큼 안 오면 안내 표시
+        const STALL_LIMIT_MS = 10000;       // 이만큼 안 오면 상대가 나간 것으로 처리
+
+        const NICK_MAX = 8;
+        function sanitizeNick(v) {
+            if (typeof v !== 'string') return '';
+            const clean = v
+                .replace(/[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2066-\u2069]/g, '')
+                .replace(/\s+/g, ' ')
+                .trim();
+            return Array.from(clean).slice(0, NICK_MAX).join('');
+        }
+
+        let remotePlayers = {};   // 메인 월드에서 동기화된 접속자 목록
+        let myNetId = '';
+
+        function nickLabel(id, p) {
+            const nick = sanitizeNick(p && p.name);
+            if (id === myNetId) return nick || '나';
+            return nick || String(id).substring(0, 5);
+        }
+
+        const onl = {
+            on: false, role: '', myIdx: 0, oppId: '', names: ['1P', '2P'], pets: [null, null], drain: [12.5, 12.5],
+            link: 'none', linkT0: 0, myHello: null, remoteHello: null, started: false,
+            frame: 0, localIn: {}, remoteIn: {}, cur: null, pendingPet: false,
+            stallMs: 0, hashes: {}, forfeit: '', desync: false, endXP: 0,
+            inviting: null, incoming: null, seenInv: {}, declined: {}, toast: null, scroll: 0
+        };
+
+        function myLevel() { return Math.floor(totalXP / 2000) + 1; }
+        function myOnlinePet() { return myLevel() >= 3 ? selectedPet : null; }
+        function showToast(msg) { onl.toast = { msg: msg, until: Date.now() + 2800 }; }
+
+        // 메인 월드 → 게임 메시지
+        window.addEventListener('message', (e) => {
+            if (e.source !== window.parent) return;
+            const d = e.data;
+            if (!d || typeof d.type !== 'string') return;
+            if (d.type === 'SYNC_PLAYERS') {
+                if (d.players && typeof d.players === 'object') remotePlayers = d.players;
+                if (typeof d.myId === 'string') myNetId = d.myId;
+                scanNet();
+            } else if (d.type === 'SC_LINK') {
+                onLinkEvent(d.state);
+            } else if (d.type === 'SC_DATA') {
+                onNetData(d.data);
+            }
+        });
+
+        function resetOnlineMatchState() {
+            onl.link = 'none'; onl.started = false; onl.myHello = null; onl.remoteHello = null;
+            onl.frame = 0; onl.localIn = {}; onl.remoteIn = {}; onl.cur = null; onl.pendingPet = false;
+            onl.stallMs = 0; onl.hashes = {}; onl.forfeit = ''; onl.desync = false; onl.endXP = 0; onl.oppId = '';
+        }
+
+        function enterOnlineList() {
+            if (!inFrame()) { alert("온라인 대전은 미니게임 월드에서 이용할 수 있어요!"); return; }
+            onl.on = true; onl.inviting = null; onl.incoming = null; onl.scroll = 0; onl.toast = null;
+            resetOnlineMatchState();
+            gameState = 'onlineList';
+            toMain({ type: 'SC_SET', on: true, match: null, inv: null, rep: null });
+        }
+
+        function leaveOnlineList() {
+            onl.on = false; onl.inviting = null; onl.incoming = null;
+            toMain({ type: 'SC_SET', on: false, match: null, inv: null, rep: null });
+            gameState = 'menu'; updateUI();
+        }
+
+        // 온라인 세션 완전 종료 (메뉴로 나갈 때)
+        function closeOnlineSession() {
+            toMain({ type: 'SC_CLOSE' });
+            toMain({ type: 'SC_SET', on: false, match: null, inv: null, rep: null });
+            onl.on = false; onl.inviting = null; onl.incoming = null;
+            resetOnlineMatchState();
+        }
+
+        // ---- 목록 데이터 ----
+        function onlineRows() {
+            const rows = [];
+            const now = Date.now();
+            for (const id in remotePlayers) {
+                if (id === myNetId) continue;
+                const p = remotePlayers[id];
+                if (!p || typeof p !== 'object') continue;
+                let status = 'main';
+                if (p.scMatch) status = 'busy';
+                else if (p.scOn) status = 'wait';
+                let c = Array.isArray(p.color) ? p.color : [255, 255, 255];
+                c = [Number(c[0]) || 0, Number(c[1]) || 0, Number(c[2]) || 0];
+                rows.push({ id: id, name: nickLabel(id, p), color: c, status: status, declLeft: Math.max(0, ((onl.declined[id] || 0) - now) / 1000) });
+            }
+            const order = { wait: 0, main: 1, busy: 2 };
+            rows.sort((a, b) => (order[a.status] - order[b.status]) || a.name.localeCompare(b.name) || (a.id < b.id ? -1 : 1));
+            return rows;
+        }
+        function canInvite(r) { return r.status === 'wait' && r.declLeft <= 0 && !onl.inviting && !onl.incoming; }
+
+        // ---- 초대 / 응답 ----
+        function sendInvite(id) {
+            if (onl.inviting || onl.incoming) return;
+            const seq = Date.now();
+            onl.inviting = { to: id, seq: seq, t0: Date.now() };
+            toMain({ type: 'SC_SET', inv: { to: id, seq: seq }, rep: null });
+        }
+        function cancelInvite(msg) {
+            onl.inviting = null;
+            toMain({ type: 'SC_SET', inv: null });
+            if (msg) showToast(msg);
+        }
+        function sendReply(to, seq, ok) { toMain({ type: 'SC_SET', rep: { to: to, seq: seq, ok: ok } }); }
+
+        function acceptIncoming() {
+            const inc = onl.incoming; if (!inc) return;
+            onl.incoming = null;
+            onl.oppId = inc.from; onl.role = 'R'; onl.myIdx = 1;
+            gameState = 'onlineLink'; onl.link = 'connecting'; onl.linkT0 = Date.now();
+            toMain({ type: 'SC_EXPECT', peerId: inc.from });   // 먼저 약속된 상대를 등록해야 연결을 받을 수 있음
+            toMain({ type: 'SC_SET', match: inc.from, inv: null, rep: { to: inc.from, seq: inc.seq, ok: true } });
+        }
+        function declineIncoming() {
+            const inc = onl.incoming; if (!inc) return;
+            onl.incoming = null;
+            sendReply(inc.from, inc.seq, false);
+        }
+        function onAccepted(to) {   // 내가 보낸 초대가 수락됨 → 내가 왼쪽(1P), 직접 연결을 먼저 시도
+            onl.inviting = null;
+            onl.oppId = to; onl.role = 'L'; onl.myIdx = 0;
+            gameState = 'onlineLink'; onl.link = 'connecting'; onl.linkT0 = Date.now();
+            toMain({ type: 'SC_SET', match: to, inv: null });
+            toMain({ type: 'SC_CONNECT', peerId: to });
+        }
+
+        // 목록 상태 점검: 내 초대의 응답 / 들어온 초대 / 만료
+        function scanNet() {
+            if (!onl.on) return;
+            const now = Date.now();
+
+            if (onl.inviting) {
+                const t = remotePlayers[onl.inviting.to];
+                if (!t) cancelInvite('상대가 방을 나갔어요');
+                else if (t.rep && t.rep.to === myNetId && t.rep.seq === onl.inviting.seq) {
+                    const to = onl.inviting.to;
+                    if (t.rep.ok === true) onAccepted(to);
+                    else { onl.declined[to] = Date.now() + DECLINE_COOLDOWN; cancelInvite('초대가 거절됐어요'); }
+                    return;
+                }
+                else if (t.scMatch && t.scMatch !== myNetId) cancelInvite('상대가 다른 대전을 시작했어요');
+                else if (now - onl.inviting.t0 > INVITE_TIMEOUT) cancelInvite('응답이 없어 초대가 취소됐어요');
+            }
+
+            if (gameState === 'onlineList' || gameState === 'onlineLink') {
+                for (const id in remotePlayers) {
+                    if (id === myNetId) continue;
+                    const p = remotePlayers[id];
+                    if (!p || !p.inv || p.inv.to !== myNetId || !Number.isFinite(p.inv.seq)) continue;
+                    const key = id + ':' + p.inv.seq;
+                    if (onl.seenInv[key]) continue;
+                    onl.seenInv[key] = now;
+                    if (gameState !== 'onlineList') continue;   // 연결 중에는 조용히 무시 (상대 쪽에서 만료됨)
+                    if (onl.incoming || onl.inviting) { sendReply(id, p.inv.seq, false); continue; }
+                    onl.incoming = { from: id, seq: p.inv.seq, t0: now };
+                }
+            }
+
+            for (const k in onl.seenInv) { if (now - onl.seenInv[k] > 60000) delete onl.seenInv[k]; }
+
+            if (onl.incoming) {
+                const s = remotePlayers[onl.incoming.from];
+                if (!s || !s.inv || s.inv.to !== myNetId || s.inv.seq !== onl.incoming.seq) { onl.incoming = null; showToast('초대가 취소됐어요'); }
+                else if (now - onl.incoming.t0 > INVITE_TIMEOUT) { onl.incoming = null; }
+            }
+        }
+
+        function onlineTick() {
+            if (onl.toast && Date.now() > onl.toast.until) onl.toast = null;
+            if (!onl.on) return;
+            scanNet();
+            if (gameState === 'onlineLink') {
+                const el = Date.now() - onl.linkT0;
+                if (onl.link !== 'open' && el > LINK_TIMEOUT) failLink('연결에 실패했어요. 네트워크 환경을 확인해 주세요');
+                else if (onl.link === 'open' && !onl.started && el > 25000) failLink('상대 응답이 없어요');
+            }
+        }
+
+        function failLink(msg) {
+            toMain({ type: 'SC_CLOSE' });
+            toMain({ type: 'SC_SET', match: null, inv: null, rep: null });
+            resetOnlineMatchState();
+            gameState = 'onlineList';
+            if (msg) showToast(msg);
+        }
+
+        // ---- 직접 연결 / 핸드셰이크 ----
+        function onLinkEvent(state) {
+            if (state === 'open') {
+                if (gameState !== 'onlineLink') return;
+                onl.link = 'open'; onl.linkT0 = Date.now();
+                onl.myHello = { pet: myOnlinePet(), lv: myLevel() };
+                netSend({ k: 'hello', pet: onl.myHello.pet, lv: onl.myHello.lv });
+                if (onl.role === 'L' && onl.remoteHello) startAsLeader();
+            } else {   // closed / error
+                if (gameState === 'onlineLink') failLink('연결이 끊어졌어요');
+                else if (gameState === 'online') opponentGone();
+            }
+        }
+
+        function cleanHello(h) {
+            h = h || {};
+            let lv = Number(h.lv); if (!Number.isFinite(lv) || lv < 1) lv = 1; if (lv > 999) lv = 999;
+            lv = Math.floor(lv);
+            const pet = (lv >= 3 && petList.some(p => p.id === h.pet)) ? h.pet : null;
+            return { pet: pet, lv: lv };
+        }
+
+        function startAsLeader() {
+            const seed = (Math.random() * 4294967296) >>> 0;
+            const kk = isKkikkimong;   // 끼끼몽 에디션은 초대한 사람(1P) 설정을 따름
+            netSend({ k: 'start', seed: seed, kk: kk, h: onl.myHello });
+            beginOnline(seed, kk, onl.myHello, onl.remoteHello);
+        }
+
+        function beginOnline(seed, kk, hL, hR) {
+            const lId = onl.role === 'L' ? myNetId : onl.oppId;
+            const rId = onl.role === 'L' ? onl.oppId : myNetId;
+            onl.names = [nickLabel(lId, remotePlayers[lId]), nickLabel(rId, remotePlayers[rId])];
+            onl.pets = [hL.pet, hR.pet];
+            onl.drain = [hL.lv >= 6 ? 100 / 13 : 12.5, hR.lv >= 6 ? 100 / 13 : 12.5];
+            onl.frame = 0; onl.localIn = {}; onl.remoteIn = {}; onl.hashes = {};
+            for (let i = 0; i < IN_DELAY; i++) { onl.localIn[i] = { m: 0, p: 0 }; onl.remoteIn[i] = { m: 0, p: 0 }; }
+            onl.cur = [{ m: 0, p: 0 }, { m: 0, p: 0 }];
+            onl.pendingPet = false; onl.stallMs = 0; onl.forfeit = ''; onl.desync = false; onl.endXP = 0;
+            onl.started = true; onl.on = false;   // 대전 중에는 초대 목록 처리를 멈춤
+            acc = 0;
+            startMode('online', { seed: seed, kk: kk, pets: onl.pets, drain: onl.drain });
+        }
+
+        function onNetData(d) {
+            if (!d || typeof d.k !== 'string') return;
+            if (d.k === 'hello') {
+                if (onl.remoteHello) return;
+                onl.remoteHello = cleanHello(d);
+                if (onl.role === 'L' && onl.link === 'open' && !onl.started && gameState === 'onlineLink') startAsLeader();
+            } else if (d.k === 'start') {
+                if (onl.role !== 'R' || onl.started || gameState !== 'onlineLink') return;
+                if (!Number.isInteger(d.seed)) return;
+                beginOnline(d.seed >>> 0, d.kk === true, cleanHello(d.h), onl.myHello || { pet: myOnlinePet(), lv: myLevel() });
+            } else if (d.k === 'in') {
+                if (!onl.started || gameState !== 'online') return;
+                if (Number.isInteger(d.f) && d.f >= onl.frame && d.f < onl.frame + 120 && (d.m === -1 || d.m === 0 || d.m === 1)) {
+                    onl.remoteIn[d.f] = { m: d.m, p: d.p === 1 ? 1 : 0 };
+                }
+            } else if (d.k === 'h') {
+                if (!onl.started || !Number.isInteger(d.f) || !Number.isFinite(d.v)) return;
+                const e = onl.hashes[d.f] || (onl.hashes[d.f] = {});
+                e.t = d.v; checkHash(d.f);
+            } else if (d.k === 'leave') {
+                if (gameState === 'online') opponentGone();
+            }
+        }
+
+        // ---- 락스텝 ----
+        function sampleLocalInput() {
+            let m = 0;
+            if (controlType === 'pc') m = (keys['ArrowLeft'] || keys['KeyA']) ? -1 : ((keys['ArrowRight'] || keys['KeyD']) ? 1 : 0);
+            else m = mobileMove;
+            const pe = onl.pendingPet ? 1 : 0; onl.pendingPet = false;
+            return { m: m, p: pe };
+        }
+
+        function hashState() {
+            let h = rngState >>> 0;
+            const mix = (v) => { h = (Math.imul(h ^ (v | 0), 0x9E3779B1) + 0x7F4A7C15) >>> 0; };
+            mix(players[0].score); mix(players[1].score); mix(items.length); mix(timer);
+            mix(Math.round(players[0].x * 100)); mix(Math.round(players[1].x * 100));
+            mix(Math.round(players[0].petBattery * 100)); mix(Math.round(players[1].petBattery * 100));
+            return h;
+        }
+        function checkHash(f) {
+            const e = onl.hashes[f];
+            if (!e || e.m === undefined || e.t === undefined) return;
+            if (e.m !== e.t) desyncEnd(); else delete onl.hashes[f];
+        }
+
+        // 한 스텝 진행. 온라인에서 상대 입력이 아직 없으면 false (대기)
+        function stepSim() {
+            if (gameState === 'online' && onl.started) {
+                const f = onl.frame, tf = f + IN_DELAY;
+                if (onl.localIn[tf] === undefined) {   // IN_DELAY 프레임 뒤에 적용될 내 입력을 지금 확정해서 전송
+                    const li = sampleLocalInput();
+                    onl.localIn[tf] = li;
+                    netSend({ k: 'in', f: tf, m: li.m, p: li.p });
+                }
+                const loc = onl.localIn[f], rem = onl.remoteIn[f];
+                if (!loc || !rem) return false;
+                onl.cur = onl.myIdx === 0 ? [loc, rem] : [rem, loc];
+                update(STEP);
+                delete onl.localIn[f]; delete onl.remoteIn[f];
+                onl.frame = f + 1;
+                if (onl.frame % 120 === 0 && gameState === 'online') {   // 2초마다 상태 해시를 교환해 어긋남 감지
+                    const v = hashState();
+                    const e = onl.hashes[onl.frame] || (onl.hashes[onl.frame] = {});
+                    e.m = v; netSend({ k: 'h', f: onl.frame, v: v }); checkHash(onl.frame);
+                }
+                return true;
+            }
+            update(STEP);
+            return true;
+        }
+
+        // ---- 종료 처리 ----
+        function opponentGone() {   // 상대 이탈 → 남은 쪽 몰수승 (중단 시점까지의 점수 기준 XP)
+            if (gameState !== 'online') return;
+            const avg = (players[0].score + players[1].score) / 2;
+            onl.endXP = Math.floor(avg * 0.15 * ((180 - timer) / 180));
+            if (onl.endXP > 0) applyXP(onl.endXP);
+            onl.forfeit = 'opp';
+            isCountingDown = false; playBgm('stop'); gameState = 'gameOver'; updateUI();
+        }
+        function desyncEnd() {
+            if (gameState !== 'online') return;
+            onl.desync = true; onl.endXP = 0;
+            isCountingDown = false; playBgm('stop'); gameState = 'gameOver'; updateUI();
+        }
+
+        // ---- 화면 ----
+        const LIST_Y = 140, ROW_H = 60, ROW_GAP = 8, ROWS_VIS = 7;
+        function rowRect(i) { return { x: 40, y: LIST_Y + i * (ROW_H + ROW_GAP), w: 520, h: ROW_H }; }
+        function invBtnRect(i) { const r = rowRect(i); return { x: r.x + r.w - 110, y: r.y + 12, w: 96, h: 36 }; }
+        const BACK_RECT = { x: 200, y: 700, w: 200, h: 56 };
+        const ACCEPT_RECT = { x: 110, y: 430, w: 170, h: 56 };
+        const DECLINE_RECT = { x: 320, y: 430, w: 170, h: 56 };
+        const CANCEL_RECT = { x: 200, y: 430, w: 200, h: 56 };
+        const SCROLL_UP = { x: 200, y: 640, w: 90, h: 36 };
+        const SCROLL_DN = { x: 310, y: 640, w: 90, h: 36 };
+
+        function inRect(mx, my, r) { return mx >= r.x && mx <= r.x + r.w && my >= r.y && my <= r.y + r.h; }
+        function fillBtn(r, color, label, textColor, font) {
+            ctx.fillStyle = color; ctx.beginPath(); ctx.roundRect(r.x, r.y, r.w, r.h, 10); ctx.fill();
+            ctx.fillStyle = textColor || "white"; ctx.font = font || "bold 18px sans-serif"; ctx.textAlign = "center";
+            ctx.fillText(label, r.x + r.w / 2, r.y + r.h / 2 + 6);
+        }
+
+        function drawOnlineRow(r, i) {
+            const rc = rowRect(i), b = invBtnRect(i);
+            ctx.save();
+            ctx.globalAlpha = r.declLeft > 0 ? 0.4 : 1;   // 거절당한 상대는 10초간 흐리게
+            ctx.fillStyle = "rgba(15,23,42,0.9)"; ctx.beginPath(); ctx.roundRect(rc.x, rc.y, rc.w, rc.h, 12); ctx.fill();
+            ctx.fillStyle = `rgb(${r.color[0] | 0},${r.color[1] | 0},${r.color[2] | 0})`; ctx.strokeStyle = "#000"; ctx.lineWidth = 2;
+            ctx.beginPath(); ctx.arc(rc.x + 28, rc.y + 30, 15, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+            ctx.textAlign = "left"; ctx.fillStyle = "white"; ctx.font = "bold 20px sans-serif"; ctx.fillText(r.name, rc.x + 56, rc.y + 27);
+
+            let st, col;
+            if (r.declLeft > 0) { st = `🔴 거절됨 · ${Math.ceil(r.declLeft)}초 뒤 다시 초대 가능`; col = "#f87171"; }
+            else if (r.status === 'wait') { st = "🟢 대기 중"; col = "#4ade80"; }
+            else if (r.status === 'busy') { st = "🟠 대전 중"; col = "#fb923c"; }
+            else { st = "⚪ 접속 중 (온라인 탭 밖이라 초대할 수 없어요)"; col = "#94a3b8"; }
+            ctx.font = "12px sans-serif"; ctx.fillStyle = col; ctx.fillText(st, rc.x + 56, rc.y + 48);
+
+            if (r.status !== 'busy') {
+                const ok = canInvite(r);
+                ctx.fillStyle = ok ? "#22d3ee" : "#475569"; ctx.beginPath(); ctx.roundRect(b.x, b.y, b.w, b.h, 10); ctx.fill();
+                ctx.fillStyle = ok ? "#083344" : "#94a3b8"; ctx.font = "bold 16px sans-serif"; ctx.textAlign = "center";
+                ctx.fillText("초대", b.x + b.w / 2, b.y + 24);
+            }
+            ctx.restore();
+        }
+
+        function drawOnlineList() {
+            ctx.textAlign = "center"; ctx.fillStyle = "white"; ctx.font = "bold 38px sans-serif"; ctx.fillText("ONLINE DUAL 🌐", 300, 62);
+            ctx.font = "14px sans-serif"; ctx.fillStyle = "rgba(255,255,255,0.9)"; ctx.fillText("같은 방의 플레이어를 초대해 1대1로 대결하세요", 300, 92);
+            ctx.fillStyle = "rgba(0,0,0,0.35)"; ctx.beginPath(); ctx.roundRect(30, 118, 540, 560, 14); ctx.fill();
+
+            const rows = onlineRows();
+            const maxScroll = Math.max(0, rows.length - ROWS_VIS);
+            if (onl.scroll > maxScroll) onl.scroll = maxScroll;
+            if (onl.scroll < 0) onl.scroll = 0;
+
+            if (rows.length === 0) {
+                ctx.textAlign = "center"; ctx.fillStyle = "rgba(255,255,255,0.8)"; ctx.font = "bold 18px sans-serif";
+                ctx.fillText(Object.keys(remotePlayers).length === 0 ? "접속자 목록을 불러오는 중..." : "방에 다른 플레이어가 없어요", 300, 330);
+                ctx.font = "14px sans-serif"; ctx.fillText("친구가 방에 들어오면 여기에 표시돼요", 300, 362);
+            }
+            rows.slice(onl.scroll, onl.scroll + ROWS_VIS).forEach((r, i) => drawOnlineRow(r, i));
+            if (rows.length > ROWS_VIS) {
+                fillBtn(SCROLL_UP, "#334155", "▲", "white", "bold 16px sans-serif");
+                fillBtn(SCROLL_DN, "#334155", "▼", "white", "bold 16px sans-serif");
+            }
+            fillBtn(BACK_RECT, "#ff4757", "BACK", "white", "bold 22px sans-serif");
+
+            // 연결 중 / 초대 중 / 초대 받음 오버레이
+            if (gameState === 'onlineLink') {
+                ctx.fillStyle = "rgba(0,0,0,0.7)"; ctx.fillRect(0, 0, 600, 800);
+                ctx.fillStyle = "#1e293b"; ctx.strokeStyle = "#22d3ee"; ctx.lineWidth = 3; ctx.beginPath(); ctx.roundRect(80, 290, 440, 220, 18); ctx.fill(); ctx.stroke();
+                ctx.fillStyle = "white"; ctx.textAlign = "center"; ctx.font = "bold 26px sans-serif"; ctx.fillText("🌐 상대와 연결 중...", 300, 350);
+                ctx.font = "15px sans-serif"; ctx.fillStyle = "#cbd5e1";
+                ctx.fillText(onl.link === 'open' ? "대전을 준비하고 있어요" : "직접 연결을 만드는 중이에요 (최대 15초)", 300, 385);
+                fillBtn(CANCEL_RECT, "#475569", "취소", "white", "bold 18px sans-serif");
+            } else if (onl.incoming) {
+                const nm = nickLabel(onl.incoming.from, remotePlayers[onl.incoming.from]);
+                const left = Math.max(0, Math.ceil((INVITE_TIMEOUT - (Date.now() - onl.incoming.t0)) / 1000));
+                ctx.fillStyle = "rgba(0,0,0,0.7)"; ctx.fillRect(0, 0, 600, 800);
+                ctx.fillStyle = "#1e293b"; ctx.strokeStyle = "#facc15"; ctx.lineWidth = 3; ctx.beginPath(); ctx.roundRect(80, 280, 440, 230, 18); ctx.fill(); ctx.stroke();
+                ctx.fillStyle = "#facc15"; ctx.textAlign = "center"; ctx.font = "bold 24px sans-serif"; ctx.fillText("📩 대전 초대가 왔어요!", 300, 330);
+                ctx.fillStyle = "white"; ctx.font = "bold 20px sans-serif"; ctx.fillText(`${nm}님이 1:1 대결을 신청했어요`, 300, 372);
+                ctx.fillStyle = "#94a3b8"; ctx.font = "14px sans-serif"; ctx.fillText(`${left}초 안에 응답해 주세요`, 300, 402);
+                fillBtn(ACCEPT_RECT, "#22c55e", "수락", "#052e16", "bold 20px sans-serif");
+                fillBtn(DECLINE_RECT, "#ef4444", "거절", "white", "bold 20px sans-serif");
+            } else if (onl.inviting) {
+                const nm = nickLabel(onl.inviting.to, remotePlayers[onl.inviting.to]);
+                const left = Math.max(0, Math.ceil((INVITE_TIMEOUT - (Date.now() - onl.inviting.t0)) / 1000));
+                ctx.fillStyle = "rgba(0,0,0,0.7)"; ctx.fillRect(0, 0, 600, 800);
+                ctx.fillStyle = "#1e293b"; ctx.strokeStyle = "#22d3ee"; ctx.lineWidth = 3; ctx.beginPath(); ctx.roundRect(80, 280, 440, 230, 18); ctx.fill(); ctx.stroke();
+                ctx.fillStyle = "white"; ctx.textAlign = "center"; ctx.font = "bold 22px sans-serif"; ctx.fillText(`${nm}님에게 초대를 보냈어요`, 300, 335);
+                ctx.fillStyle = "#cbd5e1"; ctx.font = "16px sans-serif"; ctx.fillText(`응답을 기다리는 중... ${left}초`, 300, 375);
+                fillBtn(CANCEL_RECT, "#475569", "초대 취소", "white", "bold 18px sans-serif");
+            }
+
+            if (onl.toast) {
+                ctx.fillStyle = "rgba(0,0,0,0.85)"; ctx.beginPath(); ctx.roundRect(70, 104, 460, 38, 19); ctx.fill();
+                ctx.fillStyle = "#fde68a"; ctx.textAlign = "center"; ctx.font = "bold 15px sans-serif"; ctx.fillText(onl.toast.msg, 300, 128);
+            }
+        }
+
+        function drawOnlineStall() {
+            if (onl.stallMs > STALL_WARN_MS) {
+                const left = Math.max(0, Math.ceil((STALL_LIMIT_MS - onl.stallMs) / 1000));
+                ctx.fillStyle = "rgba(0,0,0,0.75)"; ctx.fillRect(0, 330, 600, 120);
+                ctx.fillStyle = "#fde68a"; ctx.textAlign = "center"; ctx.font = "bold 22px sans-serif"; ctx.fillText("⚠️ 상대 연결을 확인하는 중...", 300, 385);
+                ctx.fillStyle = "white"; ctx.font = "16px sans-serif"; ctx.fillText(`${left}초 안에 돌아오지 않으면 몰수승 처리돼요`, 300, 418);
+            } else if (onl.stallMs > 600) {
+                ctx.fillStyle = "rgba(0,0,0,0.6)"; ctx.beginPath(); ctx.roundRect(190, 70, 220, 30, 15); ctx.fill();
+                ctx.fillStyle = "#fde68a"; ctx.textAlign = "center"; ctx.font = "bold 14px sans-serif"; ctx.fillText("⏳ 상대 입력을 기다리는 중...", 300, 90);
+            }
+        }
+
+        function handleOnlineClick(mx, my) {
+            if (gameState === 'onlineLink') {
+                if (inRect(mx, my, CANCEL_RECT)) failLink(null);
+                return;
+            }
+            if (onl.incoming) {
+                if (inRect(mx, my, ACCEPT_RECT)) acceptIncoming();
+                else if (inRect(mx, my, DECLINE_RECT)) declineIncoming();
+                return;
+            }
+            if (onl.inviting) {
+                if (inRect(mx, my, CANCEL_RECT)) cancelInvite(null);
+                return;
+            }
+            if (inRect(mx, my, BACK_RECT)) { playSynthSound('collect'); leaveOnlineList(); return; }
+            const rows = onlineRows();
+            if (rows.length > ROWS_VIS) {
+                if (inRect(mx, my, SCROLL_UP)) { onl.scroll = Math.max(0, onl.scroll - 1); return; }
+                if (inRect(mx, my, SCROLL_DN)) { onl.scroll = Math.min(rows.length - ROWS_VIS, onl.scroll + 1); return; }
+            }
+            rows.slice(onl.scroll, onl.scroll + ROWS_VIS).forEach((r, i) => {
+                if (inRect(mx, my, invBtnRect(i)) && canInvite(r)) { playSynthSound('collect'); sendInvite(r.id); }
+            });
+        }
+
+        canvas.addEventListener('wheel', (e) => {
+            if (gameState !== 'onlineList') return;
+            e.preventDefault();
+            onl.scroll += e.deltaY > 0 ? 1 : -1;
+        }, { passive: false });
+
+        function handleAction(e, isStart) {
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            if (gameState === 'menu' && bgmMenu.paused && globalVolume > 0) bgmMenu.play().catch(()=>{});
+            const pos = getMousePos(e); const mx = pos.x; const my = pos.y;
+
+            if (isStart && (gameState === 'training' || gameState === 'paused')) { if (mx > 540 && mx < 590 && my > 10 && my < 50) { togglePause(); return; } }
+            if (isStart && ['training', 'solo', 'dual'].includes(gameState)) {
+                if (gameState === 'dual') { if (mx > 20 && mx < 120 && my > 20 && my < 60 && players[0].pet && players[0].overheatTimer <= 0) { players[0].petEnabled = !players[0].petEnabled; playSynthSound('collect'); return; } if (mx > 480 && mx < 580 && my > 20 && my < 60 && players[1].pet && players[1].overheatTimer <= 0) { players[1].petEnabled = !players[1].petEnabled; playSynthSound('collect'); return; } }
+                else if (mx > 20 && mx < 120 && my > 20 && my < 60 && players[0].pet && players[0].overheatTimer <= 0) { players[0].petEnabled = !players[0].petEnabled; playSynthSound('collect'); return; }
+            }
+            // 🌐 온라인: 내 칸의 펫 버튼 (직접 켜지 않고 '입력'으로 보내 양쪽이 같은 프레임에 반영)
+            if (isStart && gameState === 'online' && onl.started && !isCountingDown) {
+                const bx = onl.myIdx === 0 ? 20 : 480;
+                if (mx > bx && mx < bx + 100 && my > 20 && my < 60 && players[onl.myIdx].pet) { onl.pendingPet = true; return; }
+            }
+            if (!isStart) { mobileMove = 0; return; }
+
+            if (gameState === 'menu') {
+                let currentLv = Math.floor(totalXP / 2000) + 1;
+                const card = MENU_CARDS.find(c => mx > CARD_X && mx < CARD_X + CARD_W && my > c.y && my < c.y + CARD_H);
+                if (card) {
+                    if (card.id === 'training') { playSynthSound('collect'); startMode('training'); }
+                    else if (card.id === 'solo') { playSynthSound('collect'); startMode('solo'); }
+                    else if (card.id === 'dual') { if (controlType === 'mobile') alert("PC 모드에서 실행해주세요"); else { playSynthSound('collect'); startMode('dual'); } }
+                    else if (card.id === 'online') { playSynthSound('collect'); enterOnlineList(); }
+                    else if (card.id === 'ai') { playSynthSound('collect'); gameState = 'aiDifficulty'; }
+                }
+                else if (my > 610 && my < 650) {
+                    if (mx > 60 && mx < 290) { playSynthSound('collect'); controlType = (controlType === 'pc' ? 'mobile' : 'pc'); }
+                    else if (mx > 310 && mx < 540) { if (currentLv >= 3) { playSynthSound('collect'); gameState = 'petSelect'; } }
+                }
+                else if (my > 660 && my < 700) {
+                    if (mx > 60 && mx < 290) { playSynthSound('collect'); gameState = 'help'; }
+                    else if (mx > 310 && mx < 540) { playSynthSound('collect'); gameState = 'setting'; }
+                }
+                updateUI();
+            } else if (gameState === 'onlineList' || gameState === 'onlineLink') {
+                handleOnlineClick(mx, my);
+            } else if (gameState === 'aiDifficulty') {
+                if (mx > 60 && mx < 540) {
+                    if (my > 200 && my < 300) { aiDifficulty = 'easy'; playSynthSound('collect'); startMode('ai'); }
+                    else if (my > 330 && my < 430) { aiDifficulty = 'normal'; playSynthSound('collect'); startMode('ai'); }
+                    else if (my > 460 && my < 560) { aiDifficulty = 'hard'; playSynthSound('collect'); startMode('ai'); }
+                }
+                if (mx > 200 && mx < 400 && my > 650) { gameState = 'menu'; playSynthSound('collect'); }
+            } else if (gameState === 'petSelect') {
+                let currentLv = Math.floor(totalXP / 2000) + 1;
+                if (currentLv >= 9 && my > 90 && my < 120) { if (mx > 150 && mx < 290) { petSelectTarget = 1; playSynthSound('collect'); } else if (mx > 310 && mx < 450) { petSelectTarget = 2; playSynthSound('collect'); } }
+                if (my > 130 && my < 630) { let idx = Math.floor((my - 130) / 100); if (idx >= 0 && idx < 5) { if (petSelectTarget === 1) { selectedPet = petList[idx].id; localStorage.setItem('selectedPet', selectedPet); } else { selectedPet2 = petList[idx].id; localStorage.setItem('selectedPet2', selectedPet2); } playSynthSound('collect'); } }
+                if (mx > 200 && mx < 400 && my > 650) { gameState = 'menu'; playSynthSound('collect'); }
+            } else if (gameState === 'setting') {
+                let currentLv = Math.floor(totalXP / 2000) + 1;
+                if (mx > 150 && mx < 450) {
+                    if (my > 110 && my < 160) { bgTheme = 'sky'; playSynthSound('collect'); }
+                    else if (my > 170 && my < 220) { if(currentLv >= 4) { bgTheme = 'night'; playSynthSound('collect'); } else alert("Lv.4에 해금됩니다!"); }
+                    else if (my > 230 && my < 280) { if(currentLv >= 5) { bgTheme = 'sunset'; playSynthSound('collect'); } else alert("Lv.5에 해금됩니다!"); }
+                    else if (my > 290 && my < 340) { if(currentLv >= 7) { bgTheme = 'fire'; playSynthSound('collect'); } else alert("Lv.7에 해금됩니다!"); }
+                    else if (my > 350 && my < 400) { if(currentLv >= 8) { bgTheme = 'sea'; playSynthSound('collect'); } else alert("Lv.8에 해금됩니다!"); }
+                    else if (my > 410 && my < 460) { if(currentLv >= 10) { bgTheme = 'rainbow'; playSynthSound('collect'); } else alert("Lv.10에 해금됩니다!"); }
+                }
+                if (my > 530 && my < 580) { let vols = [0, 0.05, 0.1, 0.15, 0.2]; let idx = Math.floor((mx - 50) / 100); if (idx >= 0 && idx < 5) { globalVolume = vols[idx]; playSynthSound('collect'); updateBgmVolume(); if (globalVolume === 0) playBgm('stop'); else { if(bgmMenu.paused && bgmGame.paused) playBgm('menu'); } } }
+                if (mx > 200 && mx < 400 && my > 650 && my < 710) { gameState = 'menu'; playSynthSound('collect'); }
+                if (mx > 500 && my > 700) { let pw = prompt("개발자 비밀번호:"); if (pw === "04188140") { let newXP = prompt("변경할 XP:", totalXP); if (newXP !== null) { totalXP = Number(newXP) || 0; localStorage.setItem('totalXP', totalXP); alert("XP가 적용되었습니다!"); } } else if (pw === "마음이음1023") { isKkikkimong = true; localStorage.setItem('isKkikkimong', 'true'); alert("끼끼몽 에디션 활성화!"); } else if (pw === "마음이음끼끼몽") { isKkikkimong = false; localStorage.setItem('isKkikkimong', 'false'); alert("끼끼몽 에디션 비활성화!"); } }
+            } else if (gameState === 'help') { if (mx > 450 && my < 70) { playSynthSound('collect'); goToMenu(); } }
+            else if (gameState === 'gameOver') { if (mx > 200 && mx < 400 && my > 650 && my < 710) { playSynthSound('collect'); goToMenu(); } }
+
+            if (['training', 'solo', 'dual', 'ai', 'online'].includes(gameState) && controlType === 'mobile') { if (my > 680) { if (mx < 120) mobileMove = -1; else if (mx > 480) mobileMove = 1; } }
+        }
+
+        function togglePetByKey(player) {
+            if (!player.pet || player.overheatTimer > 0) return;
+            player.petEnabled = !player.petEnabled;
+            playSynthSound('collect');
+        }
+
+        window.addEventListener('keydown', (e) => {
+            keys[e.code] = true;
+            if (e.code === 'Escape') togglePause();
+
+            if (e.repeat) return; // 키를 누르고 있을 때 반복 토글 방지
+
+            if (['training', 'solo', 'ai'].includes(gameState) && !isCountingDown) {
+                if (e.code === 'ArrowUp') { togglePetByKey(players[0]); }
+            } else if (gameState === 'dual' && !isCountingDown) {
+                if (e.code === 'KeyW') { togglePetByKey(players[0]); }
+                else if (e.code === 'ArrowUp') { togglePetByKey(players[1]); }
+            } else if (gameState === 'online' && onl.started && !isCountingDown) {
+                if ((e.code === 'ArrowUp' || e.code === 'KeyW') && players[onl.myIdx].pet) onl.pendingPet = true;   // 🌐 입력으로 예약
+            }
+        });
+        window.addEventListener('keyup', (e) => { keys[e.code] = false; });
+        canvas.addEventListener('mousedown', (e) => handleAction(e, true)); window.addEventListener('mouseup', (e) => handleAction(e, false));
+        canvas.addEventListener('touchstart', (e) => { e.preventDefault(); handleAction(e, true); }, { passive: false });
+        canvas.addEventListener('touchend', (e) => { e.preventDefault(); if (e.touches.length === 0 && e.changedTouches.length > 0) { let fakeEvent = { clientX: e.changedTouches[0].clientX, clientY: e.changedTouches[0].clientY, touches: e.changedTouches }; handleAction(fakeEvent, false); } else handleAction(e, false); }, { passive: false });
+    </script>
+</body>
+</html>
